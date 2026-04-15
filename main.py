@@ -47,7 +47,8 @@ SHOP_NAME = os.getenv("SHOP_NAME", "ShopBron")
 SHOP_TAGLINE = os.getenv("SHOP_TAGLINE", "Премиальный магазин прямо в Telegram")
 SHOP_PHONE = os.getenv("SHOP_PHONE", "+7 700 000 00 00")
 MANAGER_NAME = os.getenv("MANAGER_NAME", "Персональный менеджер")
-MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "shopbron_manager").replace("@", "").strip()
+MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "").replace("@", "").strip()
+MANAGER_ID = int(os.getenv("MANAGER_ID", str(6954213997)))
 CURRENCY = os.getenv("CURRENCY", "₸")
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "shop_store_v2.db"))
@@ -96,7 +97,7 @@ ABOUT_TEXT = f"""ℹ️ <b>{SHOP_NAME}</b>
 {SHOP_TAGLINE}
 
 📞 Телефон: {SHOP_PHONE}
-💬 Менеджер: @{MANAGER_USERNAME or 'manager'}
+💬 Менеджер: {'@' + MANAGER_USERNAME if MANAGER_USERNAME else f'ID {MANAGER_ID}'}
 👤 Главный админ: <code>{MAIN_ADMIN_ID}</code>"""
 
 DEMO_PRODUCTS = [
@@ -432,7 +433,15 @@ def is_admin(user_id: int) -> bool:
 
 
 def manager_url() -> str:
-    return f"https://t.me/{MANAGER_USERNAME}" if MANAGER_USERNAME else "https://t.me"
+    if MANAGER_USERNAME:
+        return f"https://t.me/{MANAGER_USERNAME}"
+    return f"tg://user?id={MANAGER_ID}"
+
+
+def manager_display() -> str:
+    if MANAGER_USERNAME:
+        return f"@{MANAGER_USERNAME}"
+    return f"ID {MANAGER_ID}"
 
 
 def throttle_ok(user_id: int, key: str) -> bool:
@@ -1469,10 +1478,11 @@ async def history_open(message: Message) -> None:
     await message.answer("Открыть карточку:", reply_markup=history_kb(items))
 
 
-async def checkout_start(message: Message, state: FSMContext, sale_type: str) -> None:
-    ok, error = validate_cart_stock(message.from_user.id)
+async def checkout_start(message: Message, state: FSMContext, sale_type: str, user_id: int | None = None) -> None:
+    real_user_id = int(user_id or (message.from_user.id if message.from_user else 0))
+    ok, error = validate_cart_stock(real_user_id)
     if not ok:
-        await message.answer(error, reply_markup=main_menu(message.from_user.id))
+        await message.answer(error, reply_markup=main_menu(real_user_id))
         return
 
     await state.clear()
@@ -1697,8 +1707,9 @@ async def text_menu(message: Message, state: FSMContext) -> None:
         await message.answer(
             f"💬 <b>Менеджер</b>\n\n"
             f"Имя: {escape_text(MANAGER_NAME)}\n"
-            f"Username: @{escape_text(MANAGER_USERNAME or 'manager')}\n"
-            f"Телефон: {escape_text(SHOP_PHONE)}",
+            f"Контакт: {escape_text(manager_display())}\n"
+            f"Телефон: {escape_text(SHOP_PHONE)}\n"
+            f"Telegram ID: <code>{MANAGER_ID}</code>",
             reply_markup=main_menu(message.from_user.id),
         )
         return
@@ -1868,7 +1879,7 @@ async def callback_checkout_start(callback: CallbackQuery, state: FSMContext) ->
     if sale_type not in {"order", "reservation"}:
         return
     if callback.message:
-        await checkout_start(callback.message, state, sale_type)
+        await checkout_start(callback.message, state, sale_type, callback.from_user.id)
 
 
 async def callback_sale_view(callback: CallbackQuery) -> None:
