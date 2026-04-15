@@ -222,6 +222,10 @@ class AdminBroadcastState(StatesGroup):
     waiting_text = State()
 
 
+class AdminImportCsvState(StatesGroup):
+    waiting_file = State()
+
+
 # =========================
 # DATABASE
 # =========================
@@ -358,6 +362,18 @@ def init_db() -> None:
 
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS import_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                imported_by INTEGER NOT NULL,
+                imported_at TEXT NOT NULL,
+                rows_count INTEGER NOT NULL DEFAULT 0,
+                note TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -427,6 +443,7 @@ def init_db() -> None:
             "free_delivery_from": "50000",
             "per_user_limit": "5",
             "hide_out_of_stock_after_days": "30",
+            "delivery_fee": "0",
             "banner_text": "Добро пожаловать в ShopBron — Telegram-магазин для портфолио с заказами и бронью.",
             "portfolio_description": "Telegram-магазин с каталогом, корзиной, заказами, бронью, остатками и админ-панелью внутри бота.",
         }
@@ -531,6 +548,50 @@ def set_setting(key: str, value: object) -> None:
     with closing(db()) as conn:
         conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)", (key, str(value)))
         conn.commit()
+
+
+def assign_role(user_id: int, role: str) -> None:
+    if role not in {"admin", "manager"}:
+        raise ValueError("Недопустимая роль")
+    with closing(db()) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO roles(user_id, role, created_at) VALUES (?, ?, ?)",
+            (int(user_id), role, now_str()),
+        )
+        conn.commit()
+    if role == "admin":
+        ADMIN_IDS.add(int(user_id))
+    else:
+        MANAGER_IDS.add(int(user_id))
+
+
+def remove_role(user_id: int) -> None:
+    with closing(db()) as conn:
+        conn.execute("DELETE FROM roles WHERE user_id = ?", (int(user_id),))
+        conn.commit()
+    ADMIN_IDS.discard(int(user_id))
+    MANAGER_IDS.discard(int(user_id))
+    ADMIN_IDS.add(MAIN_ADMIN_ID)
+    MANAGER_IDS.add(MAIN_ADMIN_ID)
+
+
+def get_roles_rows():
+    with closing(db()) as conn:
+        return conn.execute(
+            "SELECT user_id, role, created_at FROM roles ORDER BY CASE role WHEN 'admin' THEN 0 ELSE 1 END, user_id ASC"
+        ).fetchall()
+
+
+def roles_text() -> str:
+    rows = get_roles_rows()
+    if not rows:
+        return "Роли ещё не назначены."
+    lines = ["👥 <b>Роли доступа</b>", ""]
+    for row in rows:
+        lines.append(f"<code>{int(row['user_id'])}</code> — {escape_text(row['role'])} • {human_dt(row['created_at'])}")
+    lines.append("")
+    lines.append("Команды: /addadmin ID, /addmanager ID, /delrole ID")
+    return "\n".join(lines)
 
 
 def save_cart_meta(user_id: int, reminded: int = 0) -> None:
@@ -647,6 +708,10 @@ def get_products(
     category: Optional[str] = None,
     search: Optional[str] = None,
     only_available: bool = False,
+    price_min: Optional[int] = None,
+    price_max: Optional[int] = None,
+    sort_by: str = "newest",
+    limit: Optional[int] = None,
 ):
     with closing(db()) as conn:
         query = "SELECT * FROM products WHERE active = 1"
@@ -665,8 +730,24 @@ def get_products(
             params.extend([like, like, like])
         if only_available:
             query += " AND stock > 0"
+        if price_min is not None:
+            query += " AND price >= ?"
+            params.append(int(price_min))
+        if price_max is not None:
+            query += " AND price <= ?"
+            params.append(int(price_max))
 
-        query += " ORDER BY id DESC"
+        order_map = {
+            "cheap": "price ASC, id DESC",
+            "expensive": "price DESC, id DESC",
+            "hits": "is_hit DESC, id DESC",
+            "name": "title COLLATE NOCASE ASC, id DESC",
+            "newest": "id DESC",
+        }
+        query += f" ORDER BY {order_map.get(sort_by, 'id DESC')}"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(int(limit))
         return conn.execute(query, params).fetchall()
 
 
@@ -1028,10 +1109,65 @@ def admin_search_sales(query_text: str, limit: int = 20):
             WHERE LOWER(customer_name) LIKE ?
                OR LOWER(phone) LIKE ?
                OR CAST(id AS TEXT) = ?
+               OR CAST(user_id AS TEXT) = ?
             ORDER BY id DESC
             LIMIT ?
             """,
-            (like, like, query_text.strip(), limit),
+            (like, like, query_text.strip(), query_text.strip(), limit),
+        ).fetchall()
+
+
+def get_week_hit_products(limit: int = 10):
+    border = (now_dt() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(db()) as conn:
+        return conn.execute(
+            """
+            SELECT p.*, COALESCE(SUM(oi.quantity), 0) AS sold_qty
+            FROM products p
+            JOIN order_items oi ON oi.product_id = p.id
+            JOIN orders o ON o.id = oi.order_id
+            WHERE p.active = 1
+              AND o.type = 'order'
+              AND o.status IN ('new', 'confirmed', 'issued')
+              AND o.created_at >= ?
+            GROUP BY p.id
+            ORDER BY sold_qty DESC, p.id DESC
+            LIMIT ?
+            """,
+            (border, int(limit)),
+        ).fetchall()
+
+
+def get_week_new_products(limit: int = 10):
+    border = (now_dt() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(db()) as conn:
+        return conn.execute(
+            """
+            SELECT *
+            FROM products
+            WHERE active = 1 AND (created_at >= ? OR is_new = 1)
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (border, int(limit)),
+        ).fetchall()
+
+
+def get_cross_sell_products(product_id: int, limit: int = 3):
+    with closing(db()) as conn:
+        return conn.execute(
+            """
+            SELECT p.*, COUNT(*) AS cnt
+            FROM order_items base
+            JOIN order_items oi ON oi.order_id = base.order_id AND oi.product_id <> base.product_id
+            JOIN orders o ON o.id = oi.order_id AND o.type = 'order'
+            JOIN products p ON p.id = oi.product_id
+            WHERE base.product_id = ? AND p.active = 1
+            GROUP BY p.id
+            ORDER BY cnt DESC, p.id DESC
+            LIMIT ?
+            """,
+            (int(product_id), int(limit)),
         ).fetchall()
 
 
@@ -1108,6 +1244,15 @@ def get_stats() -> dict[str, int]:
         "revenue": int(revenue or 0),
         "stock": int(total_stock or 0),
     }
+
+
+def daily_report_text(day: Optional[str] = None) -> str:
+    day = day or now_dt().strftime("%Y-%m-%d")
+    with closing(db()) as conn:
+        orders = conn.execute("SELECT COUNT(*) AS c FROM orders WHERE type='order' AND created_at LIKE ?", (f"{day}%",)).fetchone()['c']
+        reservations = conn.execute("SELECT COUNT(*) AS c FROM orders WHERE type='reservation' AND created_at LIKE ?", (f"{day}%",)).fetchone()['c']
+        revenue = conn.execute("SELECT COALESCE(SUM(total),0) AS s FROM orders WHERE type='order' AND created_at LIKE ? AND status IN ('new','confirmed','issued')", (f"{day}%",)).fetchone()['s']
+    return f"📊 <b>Отчёт за день {day}</b>\nЗаказов: <b>{int(orders)}</b>\nБроней: <b>{int(reservations)}</b>\nОборот: <b>{money(int(revenue or 0))}</b>"
 
 
 def add_product(data: dict[str, object]) -> int:
@@ -1341,6 +1486,25 @@ def categories_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🆕 Новинки", callback_data="section:new"),
         ]
     )
+    rows.append(
+        [
+            InlineKeyboardButton(text="🔥 Хиты недели", callback_data="section:week_hits"),
+            InlineKeyboardButton(text="🆕 За 7 дней", callback_data="section:week_new"),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(text="💸 До 20 000", callback_data="price:0:20000"),
+            InlineKeyboardButton(text="💸 20–50 тыс", callback_data="price:20000:50000"),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(text="↕️ Дешевле", callback_data="sort:cheap"),
+            InlineKeyboardButton(text="↕️ Дороже", callback_data="sort:expensive"),
+        ]
+    )
+    rows.append([InlineKeyboardButton(text="📦 Только в наличии", callback_data="filter:available")])
     rows.append([InlineKeyboardButton(text="🧺 Корзина", callback_data="cart:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1361,6 +1525,7 @@ def products_kb(items) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🧺 Корзина", callback_data="cart:open"),
         ]
     )
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="catalog:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1387,6 +1552,7 @@ def product_kb(product_id: int, user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="💬 Менеджер", url=manager_url()),
         ]
     )
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="catalog:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1411,6 +1577,7 @@ def cart_kb(items) -> InlineKeyboardMarkup:
     )
     rows.append([InlineKeyboardButton(text="🧹 Очистить", callback_data="cart:clear")])
     rows.append([InlineKeyboardButton(text="🛍 Каталог", callback_data="catalog:open")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="catalog:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1422,25 +1589,20 @@ def history_kb(items) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text="🔁 Повторить", callback_data=f"sale:repeat:{oid}")])
         if item['type'] == 'reservation' and item['status'] == 'new':
             rows.append([InlineKeyboardButton(text="⏳ Продлить на 24ч", callback_data=f"sale:extend:{oid}")])
-    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else InlineKeyboardMarkup(inline_keyboard=[])
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="catalog:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def checkout_delivery_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=label, callback_data=f"delivery:{key}")]
-            for key, label in DELIVERY_METHODS.items()
-        ]
-    )
+    rows = [[InlineKeyboardButton(text=label, callback_data=f"delivery:{key}")] for key, label in DELIVERY_METHODS.items()]
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="catalog:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def checkout_payment_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=label, callback_data=f"payment:{key}")]
-            for key, label in PAYMENT_METHODS.items()
-        ]
-    )
+    rows = [[InlineKeyboardButton(text=label, callback_data=f"payment:{key}")] for key, label in PAYMENT_METHODS.items()]
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="catalog:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def admin_kb() -> InlineKeyboardMarkup:
@@ -1460,7 +1622,11 @@ def admin_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="📤 Экспорт CSV", callback_data="admin:export"),
+                InlineKeyboardButton(text="📥 Импорт CSV", callback_data="admin:import"),
+            ],
+            [
                 InlineKeyboardButton(text="💾 Бэкап БД", callback_data="admin:backup"),
+                InlineKeyboardButton(text="📊 Отчёт за сегодня", callback_data="admin:report"),
             ],
             [
                 InlineKeyboardButton(text="⏰ Истекают сегодня", callback_data="admin:expiring"),
@@ -1661,12 +1827,9 @@ async def daily_report_job(bot: Bot) -> None:
             current_day = now_dt().strftime("%Y-%m-%d")
             current_hour = now_dt().hour
             if current_hour == 21 and current_day != last_day:
-                with closing(db()) as conn:
-                    orders = conn.execute("SELECT COUNT(*) AS c FROM orders WHERE type='order' AND created_at LIKE ?", (f"{current_day}%",)).fetchone()['c']
-                    reservations = conn.execute("SELECT COUNT(*) AS c FROM orders WHERE type='reservation' AND created_at LIKE ?", (f"{current_day}%",)).fetchone()['c']
-                    revenue = conn.execute("SELECT COALESCE(SUM(total),0) AS s FROM orders WHERE type='order' AND created_at LIKE ?", (f"{current_day}%",)).fetchone()['s']
+                report = daily_report_text(current_day)
                 for admin_id in ADMIN_IDS:
-                    await safe_send_user_message(bot, admin_id, f"📊 Отчёт за день {current_day}\nЗаказов: {orders}\nБроней: {reservations}\nОборот: {money(int(revenue or 0))}")
+                    await safe_send_user_message(bot, admin_id, report)
                 last_day = current_day
         except Exception as exc:
             logging.exception("Daily report job failed: %s", exc)
@@ -1695,10 +1858,12 @@ async def start_handler(message: Message, state: FSMContext) -> None:
         message.from_user.full_name,
         message.from_user.username or "",
     )
-    await message.answer(
-        f"👋 Добро пожаловать в <b>{SHOP_NAME}</b>\n\n{SHOP_TAGLINE}",
-        reply_markup=main_menu(message.from_user.id),
-    )
+    banner = get_setting("banner_text", SHOP_TAGLINE).strip()
+    portfolio = get_setting("portfolio_description", "").strip()
+    text = f"👋 Добро пожаловать в <b>{SHOP_NAME}</b>\n\n{escape_text(banner)}"
+    if portfolio:
+        text += f"\n\n🧩 <b>О проекте</b>\n{escape_text(portfolio)}"
+    await message.answer(text, reply_markup=main_menu(message.from_user.id))
 
 
 async def menu_handler(message: Message, state: FSMContext) -> None:
@@ -1707,15 +1872,101 @@ async def menu_handler(message: Message, state: FSMContext) -> None:
 
 
 async def help_handler(message: Message) -> None:
-    await message.answer(
+    text = (
         "/start — открыть магазин\n"
         "/menu — главное меню\n"
         "/help — помощь\n"
-        "/promo КОД — применить промокод",
+        "/promo КОД — применить промокод\n"
+        "/settings — посмотреть настройки магазина"
+    )
+    if is_admin(message.from_user.id):
+        text += (
+            "\n/addadmin ID — добавить админа"
+            "\n/addmanager ID — добавить менеджера"
+            "\n/delrole ID — удалить роль"
+            "\n/roles — список ролей"
+            "\n/setsetting ключ значение — изменить настройку"
+        )
+    await message.answer(text, reply_markup=main_menu(message.from_user.id))
+
+
+async def settings_command(message: Message) -> None:
+    await message.answer(
+        "⚙️ <b>Настройки магазина</b>\n\n"
+        f"Минимальный заказ: <b>{money(get_setting_int('min_order_amount', 0))}</b>\n"
+        f"Бесплатная доставка от: <b>{money(get_setting_int('free_delivery_from', 50000))}</b>\n"
+        f"Лимит в одни руки: <b>{get_setting_int('per_user_limit', 5)} шт.</b>\n"
+        f"Скрытие пустых товаров через: <b>{get_setting_int('hide_out_of_stock_after_days', 30)} дн.</b>\n"
+        f"Стоимость доставки: <b>{money(get_setting_int('delivery_fee', 0))}</b>",
         reply_markup=main_menu(message.from_user.id),
     )
 
 
+async def add_admin_command(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Нет доступа.")
+        return
+    parts = (message.text or '').split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip().isdigit():
+        await message.answer("Использование: /addadmin ID")
+        return
+    uid = int(parts[1].strip())
+    assign_role(uid, 'admin')
+    await message.answer(f"Готово. Пользователь <code>{uid}</code> теперь admin.", reply_markup=main_menu(message.from_user.id))
+
+
+async def add_manager_command(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Нет доступа.")
+        return
+    parts = (message.text or '').split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip().isdigit():
+        await message.answer("Использование: /addmanager ID")
+        return
+    uid = int(parts[1].strip())
+    assign_role(uid, 'manager')
+    await message.answer(f"Готово. Пользователь <code>{uid}</code> теперь manager.", reply_markup=main_menu(message.from_user.id))
+
+
+async def del_role_command(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Нет доступа.")
+        return
+    parts = (message.text or '').split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip().isdigit():
+        await message.answer("Использование: /delrole ID")
+        return
+    uid = int(parts[1].strip())
+    if uid == MAIN_ADMIN_ID:
+        await message.answer("Главного админа удалить нельзя.")
+        return
+    remove_role(uid)
+    await message.answer(f"Роль пользователя <code>{uid}</code> удалена.", reply_markup=main_menu(message.from_user.id))
+
+
+async def roles_command(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Нет доступа.")
+        return
+    await message.answer(roles_text(), reply_markup=main_menu(message.from_user.id))
+
+
+async def set_setting_command(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Нет доступа.")
+        return
+    parts = (message.text or '').split(maxsplit=2)
+    if len(parts) != 3:
+        await message.answer("Использование: /setsetting ключ значение")
+        return
+    key = parts[1].strip()
+    value = parts[2].strip()
+    allowed = {"min_order_amount", "free_delivery_from", "per_user_limit", "hide_out_of_stock_after_days", "delivery_fee", "banner_text", "portfolio_description"}
+    if key not in allowed:
+        await message.answer("Недоступный ключ настройки.")
+        return
+    set_setting(key, value)
+    await message.answer(f"Настройка <b>{escape_text(key)}</b> обновлена.", reply_markup=main_menu(message.from_user.id))
 
 
 async def promo_command(message: Message, state: FSMContext) -> None:
@@ -2018,6 +2269,10 @@ async def text_menu(message: Message, state: FSMContext) -> None:
             f"Телефон: {escape_text(SHOP_PHONE)}",
             reply_markup=main_menu(message.from_user.id),
         )
+        await message.answer(
+            "Быстрая связь:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Написать менеджеру", url=manager_url())]]),
+        )
         return
 
     if text == "🚚 Доставка":
@@ -2084,10 +2339,47 @@ async def callback_catalog(callback: CallbackQuery) -> None:
 async def callback_section(callback: CallbackQuery) -> None:
     await callback.answer()
     section = callback.data.split(":", 1)[1]
-    title = "🔥 Хиты" if section == "hits" else "🆕 Новинки"
-    items = get_products(section=section)
+    if section == "week_hits":
+        title = "🔥 Хиты недели"
+        items = get_week_hit_products(20)
+    elif section == "week_new":
+        title = "🆕 Новинки за 7 дней"
+        items = get_week_new_products(20)
+    else:
+        title = "🔥 Хиты" if section == "hits" else "🆕 Новинки"
+        items = get_products(section=section)
     if callback.message:
         await callback.message.answer(products_text(title, items))
+        await callback.message.answer("Открыть товары:", reply_markup=products_kb(items))
+
+
+async def callback_price_filter(callback: CallbackQuery) -> None:
+    await callback.answer()
+    _, min_price, max_price = callback.data.split(":")
+    price_min = int(min_price)
+    price_max = int(max_price)
+    title = f"💸 Цена от {money(price_min)} до {money(price_max)}" if price_min > 0 else f"💸 До {money(price_max)}"
+    items = get_products(price_min=price_min if price_min > 0 else None, price_max=price_max, only_available=True, sort_by='cheap')
+    if callback.message:
+        await callback.message.answer(products_text(title, items))
+        await callback.message.answer("Открыть товары:", reply_markup=products_kb(items))
+
+
+async def callback_sort(callback: CallbackQuery) -> None:
+    await callback.answer()
+    sort_by = callback.data.split(":", 1)[1]
+    title = "↕️ Сортировка: дешевле" if sort_by == 'cheap' else "↕️ Сортировка: дороже"
+    items = get_products(sort_by=sort_by, only_available=True, limit=30)
+    if callback.message:
+        await callback.message.answer(products_text(title, items))
+        await callback.message.answer("Открыть товары:", reply_markup=products_kb(items))
+
+
+async def callback_filter_available(callback: CallbackQuery) -> None:
+    await callback.answer()
+    items = get_products(only_available=True, limit=30)
+    if callback.message:
+        await callback.message.answer(products_text("📦 Только в наличии", items))
         await callback.message.answer("Открыть товары:", reply_markup=products_kb(items))
 
 
@@ -2111,8 +2403,11 @@ async def callback_product(callback: CallbackQuery) -> None:
     if callback.message:
         await send_product_message(callback.message, product, callback.from_user.id)
         similar = [x for x in get_products(category=str(product['category'])) if int(x['id']) != int(product['id'])][:3]
+        cross = [x for x in get_cross_sell_products(product_id, 3) if int(x['id']) != int(product['id'])]
         if similar:
             await callback.message.answer("Похожие товары:", reply_markup=products_kb(similar))
+        if cross:
+            await callback.message.answer("🛍 С этим товаром часто берут:", reply_markup=products_kb(cross))
 
 
 async def callback_add(callback: CallbackQuery) -> None:
@@ -2626,55 +2921,124 @@ async def callback_admin_export(callback: CallbackQuery) -> None:
     if not await admin_guard(callback):
         return
     await callback.answer("Готовлю CSV…")
-    rows = get_recent_sales(1000)
-    if not rows:
-        if callback.message:
-            await callback.message.answer("Нет данных для экспорта.")
-        return
-
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8-sig", newline="", delete=False, suffix=".csv") as tmp:
-        writer = csv.writer(tmp, delimiter=";")
-        writer.writerow(
-            [
-                "id",
-                "type",
-                "status",
-                "customer_name",
-                "phone",
-                "delivery_method",
-                "payment_method",
-                "address",
-                "comment",
-                "total",
-                "created_at",
-                "updated_at",
-                "expires_at",
-            ]
-        )
-        for row in rows:
-            writer.writerow(
-                [
-                    int(row["id"]),
-                    row["type"],
-                    row["status"],
-                    row["customer_name"],
-                    row["phone"],
-                    row["delivery_method"],
-                    row["payment_method"],
-                    row["address"],
-                    row["comment"],
-                    int(row["total"]),
-                    row["created_at"],
-                    row["updated_at"],
-                    row["expires_at"],
-                ]
-            )
-        file_path = tmp.name
+    sales = get_recent_sales(5000)
+    with closing(db()) as conn:
+        products = conn.execute("SELECT * FROM products ORDER BY id DESC").fetchall()
+        customers = conn.execute("SELECT * FROM customers ORDER BY updated_at DESC").fetchall()
 
     if callback.message:
-        await callback.message.answer_document(
-            FSInputFile(file_path, filename=f"shop_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        if sales:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8-sig", newline="", delete=False, suffix=".csv") as tmp:
+                writer = csv.writer(tmp, delimiter=";")
+                writer.writerow(["id","user_id","type","status","customer_name","phone","delivery_method","payment_method","address","comment","total","created_at","updated_at","expires_at"])
+                for row in sales:
+                    writer.writerow([int(row["id"]), int(row["user_id"]), row["type"], row["status"], row["customer_name"], row["phone"], row["delivery_method"], row["payment_method"], row["address"], row["comment"], int(row["total"]), row["created_at"], row["updated_at"], row["expires_at"]])
+                sales_path = tmp.name
+            await callback.message.answer_document(FSInputFile(sales_path, filename=f"sales_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"))
+
+        if products:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8-sig", newline="", delete=False, suffix=".csv") as tmp:
+                writer = csv.writer(tmp, delimiter=";")
+                writer.writerow(["id","title","price","category","description","photo","is_hit","is_new","stock","active","created_at","updated_at"])
+                for row in products:
+                    writer.writerow([int(row["id"]), row["title"], int(row["price"]), row["category"], row["description"], row["photo"], int(row["is_hit"]), int(row["is_new"]), int(row["stock"]), int(row["active"]), row["created_at"], row["updated_at"]])
+                products_path = tmp.name
+            await callback.message.answer_document(FSInputFile(products_path, filename=f"products_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"))
+
+        if customers:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8-sig", newline="", delete=False, suffix=".csv") as tmp:
+                writer = csv.writer(tmp, delimiter=";")
+                writer.writerow(["user_id","full_name","username","phone","updated_at"])
+                for row in customers:
+                    writer.writerow([int(row["user_id"]), row["full_name"], row["username"], row["phone"], row["updated_at"]])
+                customers_path = tmp.name
+            await callback.message.answer_document(FSInputFile(customers_path, filename=f"customers_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"))
+
+
+async def callback_admin_import_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await admin_guard(callback):
+        return
+    await callback.answer()
+    await state.set_state(AdminImportCsvState.waiting_file)
+    if callback.message:
+        await callback.message.answer(
+            "Отправьте CSV-файл с колонками: title, price, category, description, photo, stock, is_hit, is_new",
+            reply_markup=cancel_menu(),
         )
+
+
+async def callback_admin_report(callback: CallbackQuery) -> None:
+    if not await admin_guard(callback):
+        return
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(daily_report_text())
+
+
+async def admin_import_csv_file(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        await message.answer("Нет доступа.")
+        return
+    if not message.document:
+        await message.answer("Пришлите именно CSV-файл.")
+        return
+
+    tmp_path = Path(tempfile.gettempdir()) / f"import_{message.from_user.id}_{int(time.time())}.csv"
+    await message.bot.download(message.document, destination=tmp_path)
+
+    added = 0
+    updated = 0
+    failed = 0
+    note = ""
+    try:
+        sample = tmp_path.read_text(encoding='utf-8-sig', errors='ignore')
+        dialect = csv.Sniffer().sniff(sample[:1024], delimiters=';,') if sample.strip() else csv.excel
+        with tmp_path.open('r', encoding='utf-8-sig', newline='') as fh:
+            reader = csv.DictReader(fh, dialect=dialect)
+            required = {'title', 'price', 'category', 'description', 'photo', 'stock', 'is_hit', 'is_new'}
+            if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
+                raise ValueError('Неверные колонки CSV.')
+            with closing(db()) as conn:
+                for row in reader:
+                    try:
+                        title = (row.get('title') or '').strip()
+                        category = (row.get('category') or '').strip()
+                        description = (row.get('description') or '').strip()
+                        photo = (row.get('photo') or '').strip()
+                        price = int((row.get('price') or '0').strip())
+                        stock = int((row.get('stock') or '0').strip())
+                        is_hit = 1 if str(row.get('is_hit', '0')).strip().lower() in {'1','true','yes','да'} else 0
+                        is_new = 1 if str(row.get('is_new', '0')).strip().lower() in {'1','true','yes','да'} else 0
+                        if not title or not category or not description or price <= 0:
+                            failed += 1
+                            continue
+                        existing = conn.execute('SELECT id FROM products WHERE LOWER(title)=LOWER(?)', (title,)).fetchone()
+                        if existing:
+                            conn.execute(
+                                "UPDATE products SET price=?, category=?, description=?, photo=?, stock=?, is_hit=?, is_new=?, active=1, updated_at=? WHERE id=?",
+                                (price, category, description, photo, stock, is_hit, is_new, now_str(), int(existing['id'])),
+                            )
+                            updated += 1
+                        else:
+                            conn.execute(
+                                "INSERT INTO products(title, price, category, description, photo, is_hit, is_new, stock, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                                (title, price, category, description, photo, is_hit, is_new, stock, now_str(), now_str()),
+                            )
+                            added += 1
+                    except Exception:
+                        failed += 1
+                conn.execute("INSERT INTO import_logs(imported_by, imported_at, rows_count, note) VALUES (?, ?, ?, ?)", (message.from_user.id, now_str(), added + updated, f'failed={failed}'))
+                conn.commit()
+        note = f"Добавлено: {added}, обновлено: {updated}, пропущено: {failed}."
+    except Exception as exc:
+        note = f"Ошибка импорта: {escape_text(exc)}"
+    finally:
+        await state.clear()
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+    await message.answer(f"📥 Импорт CSV завершён.\n{note}", reply_markup=main_menu(message.from_user.id))
 
 
 async def callback_admin_backup(callback: CallbackQuery) -> None:
@@ -2777,6 +3141,12 @@ async def main() -> None:
     dp.message.register(start_handler, CommandStart())
     dp.message.register(menu_handler, Command("menu"))
     dp.message.register(help_handler, Command("help"))
+    dp.message.register(settings_command, Command("settings"))
+    dp.message.register(add_admin_command, Command("addadmin"))
+    dp.message.register(add_manager_command, Command("addmanager"))
+    dp.message.register(del_role_command, Command("delrole"))
+    dp.message.register(roles_command, Command("roles"))
+    dp.message.register(set_setting_command, Command("setsetting"))
     dp.message.register(promo_command, Command("promo"))
     dp.message.register(cancel_handler, F.text == "❌ Отмена")
 
@@ -2794,6 +3164,9 @@ async def main() -> None:
     dp.callback_query.register(noop_handler, F.data == "noop")
     dp.callback_query.register(callback_catalog, F.data == "catalog:open")
     dp.callback_query.register(callback_section, F.data.startswith("section:"))
+    dp.callback_query.register(callback_price_filter, F.data.startswith("price:"))
+    dp.callback_query.register(callback_sort, F.data.startswith("sort:"))
+    dp.callback_query.register(callback_filter_available, F.data == "filter:available")
     dp.callback_query.register(callback_category, F.data.startswith("cat:"))
     dp.callback_query.register(callback_product, F.data.startswith("product:"))
     dp.callback_query.register(callback_add, F.data.startswith("add:"))
@@ -2820,7 +3193,9 @@ async def main() -> None:
     dp.callback_query.register(callback_admin_add_product, F.data == "admin:add_product")
     dp.callback_query.register(callback_admin_search_start, F.data == "admin:search")
     dp.callback_query.register(callback_admin_export, F.data == "admin:export")
+    dp.callback_query.register(callback_admin_import_start, F.data == "admin:import")
     dp.callback_query.register(callback_admin_backup, F.data == "admin:backup")
+    dp.callback_query.register(callback_admin_report, F.data == "admin:report")
     dp.callback_query.register(callback_admin_expiring, F.data == "admin:expiring")
     dp.callback_query.register(callback_admin_broadcast_start, F.data == "admin:broadcast")
     dp.callback_query.register(callback_admin_mass_price_start, F.data == "admin:mass_price")
@@ -2839,6 +3214,7 @@ async def main() -> None:
     dp.message.register(admin_search_input, AdminOrderSearchState.waiting_query)
     dp.message.register(admin_mass_price_input, AdminMassPriceState.waiting_percent)
     dp.message.register(admin_broadcast_input, AdminBroadcastState.waiting_text)
+    dp.message.register(admin_import_csv_file, AdminImportCsvState.waiting_file, F.document)
 
     dp.message.register(text_menu, F.text)
 
