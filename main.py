@@ -27,13 +27,14 @@ from aiogram.types import (
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8588546241:AAGuHivJBcMueKkk6nrklygRviTbsb7-Qho")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "PASTE_BOT_TOKEN_HERE")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "6954213997"))
+MANAGER_ID = int(os.getenv("MANAGER_ID", "6954213997"))
+SUPPORT_ID = int(os.getenv("SUPPORT_ID", "6954213997"))
 SHOP_NAME = os.getenv("SHOP_NAME", "ShopBron")
 SHOP_TAGLINE = os.getenv("SHOP_TAGLINE", "Премиальный магазин прямо в Telegram")
 SHOP_PHONE = os.getenv("SHOP_PHONE", "+7 700 000 00 00")
-MANAGER_NAME = os.getenv("MANAGER_NAME", "Персональный менеджер")
-MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "shopbron_manager").replace("@", "")
+MANAGER_NAME = os.getenv("MANAGER_NAME", "Администратор магазина")
 CURRENCY = os.getenv("CURRENCY", "₸")
 DB_PATH = os.getenv("DB_PATH", "premium_shop.db")
 
@@ -55,7 +56,9 @@ ABOUT_TEXT = f"""ℹ️ <b>{SHOP_NAME}</b>
 {SHOP_TAGLINE}
 
 📞 Телефон: {SHOP_PHONE}
-💬 Менеджер: @{MANAGER_USERNAME}"""
+👤 Менеджер ID: {MANAGER_ID}
+🛟 Поддержка ID: {SUPPORT_ID}
+🛠 Админ ID: {ADMIN_ID}"""
 
 
 # =========================
@@ -415,7 +418,11 @@ def get_recent_orders(limit: int = 5):
 
 
 def manager_url() -> str:
-    return f"https://t.me/{MANAGER_USERNAME}" if MANAGER_USERNAME else "https://t.me"
+    return f"tg://user?id={MANAGER_ID}"
+
+
+def support_url() -> str:
+    return f"tg://user?id={SUPPORT_ID}"
 
 
 def product_caption(product: sqlite3.Row) -> str:
@@ -831,7 +838,14 @@ async def checkout_comment(message: Message, state: FSMContext, bot: Bot) -> Non
         return
 
     await message.answer(
-        f"🎉 Заявка <b>#{order['order_id']}</b> отправлена.",
+        f"🎉 Заявка <b>#{order['order_id']}</b> отправлена.
+
+"
+        f"Админ: <code>{ADMIN_ID}</code>
+"
+        f"Менеджер: <code>{MANAGER_ID}</code>
+"
+        f"Поддержка: <code>{SUPPORT_ID}</code>",
         reply_markup=main_menu(),
     )
 
@@ -880,12 +894,16 @@ async def text_menu(message: Message, state: FSMContext) -> None:
     if text == "💬 Менеджер":
         await state.clear()
         await message.answer(
-            f"💬 <b>Менеджер</b>
+            f"💬 <b>Менеджер и поддержка</b>
 
 "
             f"Имя: {escape_text(MANAGER_NAME)}
 "
-            f"Username: @{escape_text(MANAGER_USERNAME)}
+            f"Telegram ID менеджера: <code>{MANAGER_ID}</code>
+"
+            f"Telegram ID поддержки: <code>{SUPPORT_ID}</code>
+"
+            f"Telegram ID администратора: <code>{ADMIN_ID}</code>
 "
             f"Телефон: {escape_text(SHOP_PHONE)}",
             reply_markup=main_menu(),
@@ -893,7 +911,10 @@ async def text_menu(message: Message, state: FSMContext) -> None:
         await message.answer(
             "Быстрая связь:",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="Написать менеджеру", url=manager_url())]]
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="Написать менеджеру", url=manager_url())],
+                    [InlineKeyboardButton(text="Поддержка", url=support_url())],
+                ]
             ),
         )
         return
