@@ -41,7 +41,15 @@ ADMIN_IDS = {
     if x.strip().isdigit()
 }
 MAIN_ADMIN_ID = 6954213997
+MANAGER_ID = MAIN_ADMIN_ID
 ADMIN_IDS.add(MAIN_ADMIN_ID)
+
+MANAGER_IDS = {
+    int(x.strip())
+    for x in os.getenv("MANAGER_IDS", str(MAIN_ADMIN_ID)).split(",")
+    if x.strip().isdigit()
+}
+MANAGER_IDS.add(MAIN_ADMIN_ID)
 
 SHOP_NAME = os.getenv("SHOP_NAME", "ShopBron")
 SHOP_TAGLINE = os.getenv("SHOP_TAGLINE", "Премиальный магазин прямо в Telegram")
@@ -49,9 +57,8 @@ SHOP_PHONE = os.getenv("SHOP_PHONE", "+7 700 000 00 00")
 MANAGER_NAME = os.getenv("MANAGER_NAME", "Персональный менеджер")
 MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "shopbron_manager").replace("@", "").strip()
 CURRENCY = os.getenv("CURRENCY", "₸")
-BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "shop_store_v2.db"))
-LOG_PATH = os.getenv("LOG_PATH", str(BASE_DIR / "shop_store.log"))
+DB_PATH = os.getenv("DB_PATH", "shop_store_v2.db")
+LOG_PATH = os.getenv("LOG_PATH", "shop_store.log")
 RESERVATION_HOURS = int(os.getenv("RESERVATION_HOURS", "24"))
 SPAM_INTERVAL = float(os.getenv("SPAM_INTERVAL", "0.35"))
 SHOP_CITY = os.getenv("SHOP_CITY", "Ваш город")
@@ -96,7 +103,7 @@ ABOUT_TEXT = f"""ℹ️ <b>{SHOP_NAME}</b>
 {SHOP_TAGLINE}
 
 📞 Телефон: {SHOP_PHONE}
-💬 Менеджер: @{MANAGER_USERNAME if MANAGER_USERNAME else MAIN_ADMIN_ID}
+💬 Менеджер: @{MANAGER_USERNAME or 'manager'}
 👤 Главный админ: <code>{MAIN_ADMIN_ID}</code>"""
 
 DEMO_PRODUCTS = [
@@ -197,6 +204,18 @@ class AdminOrderSearchState(StatesGroup):
     waiting_query = State()
 
 
+class PromoState(StatesGroup):
+    waiting_code = State()
+
+
+class AdminMassPriceState(StatesGroup):
+    waiting_percent = State()
+
+
+class AdminBroadcastState(StatesGroup):
+    waiting_text = State()
+
+
 # =========================
 # DATABASE
 # =========================
@@ -218,40 +237,6 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -
     columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
-
-
-def migrate_legacy_products(conn: sqlite3.Connection) -> None:
-    """Backfill stock/timestamps for databases created by the old bot version."""
-    title_to_stock = {item["title"]: int(item["stock"]) for item in DEMO_PRODUCTS}
-    now = now_str()
-
-    rows = conn.execute(
-        "SELECT id, title, stock, created_at, updated_at FROM products"
-    ).fetchall()
-
-    for row in rows:
-        updates: list[str] = []
-        params: list[object] = []
-
-        current_stock = int(row["stock"] or 0)
-        if current_stock <= 0 and row["title"] in title_to_stock:
-            updates.append("stock = ?")
-            params.append(title_to_stock[row["title"]])
-
-        if not str(row["created_at"] or "").strip():
-            updates.append("created_at = ?")
-            params.append(now)
-
-        if not str(row["updated_at"] or "").strip():
-            updates.append("updated_at = ?")
-            params.append(now)
-
-        if updates:
-            params.append(int(row["id"]))
-            conn.execute(
-                f"UPDATE products SET {', '.join(updates)} WHERE id = ?",
-                params,
-            )
 
 
 def init_db() -> None:
@@ -315,6 +300,57 @@ def init_db() -> None:
 
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                code TEXT PRIMARY KEY,
+                discount_percent INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_active_promos (
+                user_id INTEGER PRIMARY KEY,
+                code TEXT NOT NULL,
+                discount_percent INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS roles (
+                user_id INTEGER PRIMARY KEY,
+                role TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cart_meta (
+                user_id INTEGER PRIMARY KEY,
+                updated_at TEXT NOT NULL,
+                reminded INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -364,8 +400,6 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id)")
 
-        migrate_legacy_products(conn)
-
         now = now_str()
         count = conn.execute("SELECT COUNT(*) AS c FROM products").fetchone()["c"]
         if count == 0:
@@ -378,6 +412,34 @@ def init_db() -> None:
                 """,
                 [{**item, "created_at": now, "updated_at": now} for item in DEMO_PRODUCTS],
             )
+
+        defaults = {
+            "min_order_amount": "0",
+            "free_delivery_from": "50000",
+            "per_user_limit": "5",
+            "hide_out_of_stock_after_days": "30",
+            "banner_text": "Добро пожаловать в ShopBron — Telegram-магазин для портфолио с заказами и бронью.",
+            "portfolio_description": "Telegram-магазин с каталогом, корзиной, заказами, бронью, остатками и админ-панелью внутри бота.",
+        }
+        for k, v in defaults.items():
+            conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (k, v))
+
+        conn.execute(
+            "INSERT OR IGNORE INTO promo_codes(code, discount_percent, active, created_at) VALUES (?, ?, 1, ?)",
+            ("WELCOME10", 10, now),
+        )
+
+        for uid in ADMIN_IDS:
+            conn.execute(
+                "INSERT OR REPLACE INTO roles(user_id, role, created_at) VALUES (?, 'admin', ?)",
+                (uid, now),
+            )
+        for uid in MANAGER_IDS:
+            if uid not in ADMIN_IDS:
+                conn.execute(
+                    "INSERT OR IGNORE INTO roles(user_id, role, created_at) VALUES (?, 'manager', ?)",
+                    (uid, now),
+                )
 
         conn.commit()
 
@@ -428,23 +490,97 @@ def escape_text(value: object) -> str:
 
 
 def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
+    if user_id in ADMIN_IDS:
+        return True
+    with closing(db()) as conn:
+        row = conn.execute("SELECT role FROM roles WHERE user_id = ?", (user_id,)).fetchone()
+    return bool(row and row["role"] == "admin")
+
+
+def is_manager(user_id: int) -> bool:
+    if is_admin(user_id) or user_id in MANAGER_IDS:
+        return True
+    with closing(db()) as conn:
+        row = conn.execute("SELECT role FROM roles WHERE user_id = ?", (user_id,)).fetchone()
+    return bool(row and row["role"] in {"admin", "manager"})
+
+
+def get_setting(key: str, default: str = "") -> str:
+    with closing(db()) as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return str(row["value"]) if row else default
+
+
+def get_setting_int(key: str, default: int = 0) -> int:
+    try:
+        return int(get_setting(key, str(default)))
+    except Exception:
+        return default
+
+
+def set_setting(key: str, value: object) -> None:
+    with closing(db()) as conn:
+        conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)", (key, str(value)))
+        conn.commit()
+
+
+def save_cart_meta(user_id: int, reminded: int = 0) -> None:
+    with closing(db()) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO cart_meta(user_id, updated_at, reminded) VALUES (?, ?, ?)",
+            (user_id, now_str(), int(reminded)),
+        )
+        conn.commit()
+
+
+def clear_cart_meta(user_id: int) -> None:
+    with closing(db()) as conn:
+        conn.execute("DELETE FROM cart_meta WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+
+def loyalty_discount_percent(user_id: int) -> int:
+    with closing(db()) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM orders WHERE user_id = ? AND type = 'order' AND status IN ('confirmed', 'issued')",
+            (user_id,),
+        ).fetchone()
+    count = int(row["c"]) if row else 0
+    return 7 if count >= 10 else 5 if count >= 5 else 3 if count >= 3 else 0
+
+
+def set_user_promo(user_id: int, code: str) -> tuple[bool, str]:
+    with closing(db()) as conn:
+        row = conn.execute(
+            "SELECT code, discount_percent, active FROM promo_codes WHERE UPPER(code) = UPPER(?)",
+            (code.strip(),),
+        ).fetchone()
+        if not row or int(row["active"]) != 1:
+            return False, "Промокод не найден или выключен."
+        conn.execute(
+            "INSERT OR REPLACE INTO user_active_promos(user_id, code, discount_percent, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, str(row["code"]).upper(), int(row["discount_percent"]), now_str()),
+        )
+        conn.commit()
+    return True, f"Промокод {str(row['code']).upper()} применён: -{int(row['discount_percent'])}%"
+
+
+def get_user_promo(user_id: int) -> tuple[str, int]:
+    with closing(db()) as conn:
+        row = conn.execute("SELECT code, discount_percent FROM user_active_promos WHERE user_id = ?", (user_id,)).fetchone()
+    if not row:
+        return "", 0
+    return str(row["code"]), int(row["discount_percent"])
+
+
+def clear_user_promo(user_id: int) -> None:
+    with closing(db()) as conn:
+        conn.execute("DELETE FROM user_active_promos WHERE user_id = ?", (user_id,))
+        conn.commit()
 
 
 def manager_url() -> str:
-    if MANAGER_USERNAME:
-        return f"https://t.me/{MANAGER_USERNAME}"
-    return f"tg://user?id={MAIN_ADMIN_ID}"
-
-
-def manager_display() -> str:
-    return f"@{MANAGER_USERNAME}" if MANAGER_USERNAME else f"ID {MAIN_ADMIN_ID}"
-
-
-def admin_recipient_ids() -> list[int]:
-    ids = {MAIN_ADMIN_ID}
-    ids.update({admin_id for admin_id in ADMIN_IDS if isinstance(admin_id, int) and admin_id > 0})
-    return sorted(ids)
+    return f"https://t.me/{MANAGER_USERNAME}" if MANAGER_USERNAME else "https://t.me"
 
 
 def throttle_ok(user_id: int, key: str) -> bool:
@@ -619,6 +755,9 @@ def cart_add(user_id: int, product_id: int, qty: int = 1) -> tuple[bool, str]:
         ).fetchone()
         current_qty = int(row["quantity"]) if row else 0
         new_qty = current_qty + qty
+        limit_per_user = max(1, get_setting_int("per_user_limit", 5))
+        if new_qty > limit_per_user:
+            return False, f"Лимит на товар в одни руки: {limit_per_user} шт."
 
         if new_qty <= 0:
             conn.execute(
@@ -642,6 +781,7 @@ def cart_add(user_id: int, product_id: int, qty: int = 1) -> tuple[bool, str]:
                 (user_id, product_id, qty),
             )
         conn.commit()
+    save_cart_meta(user_id, reminded=0)
     return True, "Корзина обновлена."
 
 
@@ -656,12 +796,14 @@ def cart_remove(user_id: int, product_id: int) -> None:
             (user_id, product_id),
         )
         conn.commit()
+    save_cart_meta(user_id, reminded=0)
 
 
 def cart_clear(user_id: int) -> None:
     with closing(db()) as conn:
         conn.execute("DELETE FROM carts WHERE user_id = ?", (user_id,))
         conn.commit()
+    clear_cart_meta(user_id)
 
 
 def cart_items(user_id: int):
@@ -728,7 +870,15 @@ def create_sale(
     if not ok:
         raise ValueError(error)
 
-    total = sum(int(item["price"]) * int(item["quantity"]) for item in items)
+    subtotal = sum(int(item["price"]) * int(item["quantity"]) for item in items)
+    promo_code, promo_percent = get_user_promo(user_id)
+    loyalty_percent = loyalty_discount_percent(user_id)
+    discount_percent = promo_percent + loyalty_percent
+    total = max(0, subtotal - (subtotal * discount_percent // 100))
+    if sale_type == "order":
+        min_order_amount = get_setting_int("min_order_amount", 0)
+        if total < min_order_amount:
+            raise ValueError(f"Минимальная сумма заказа: {money(min_order_amount)}")
     created = now_str()
     expires_at = ""
     if sale_type == "reservation":
@@ -798,6 +948,8 @@ def create_sale(
             raise
 
     cart_clear(user_id)
+    if promo_code:
+        clear_user_promo(user_id)
 
     return {
         "id": sale_id,
@@ -814,6 +966,11 @@ def create_sale(
         "updated_at": created,
         "expires_at": expires_at,
         "items": items,
+        "subtotal": subtotal,
+        "promo_code": promo_code,
+        "promo_percent": promo_percent,
+        "loyalty_percent": loyalty_percent,
+        "discount_percent": discount_percent,
     }
 
 
@@ -1038,8 +1195,19 @@ def cart_text(user_id: int) -> str:
             f"(остаток: {int(item['stock'])})"
         )
 
+    promo_code, promo_percent = get_user_promo(user_id)
+    loyalty_percent = loyalty_discount_percent(user_id)
     lines.append("")
-    lines.append(f"Итого: <b>{money(cart_total(user_id))}</b>")
+    lines.append(f"Сумма товаров: <b>{money(cart_total(user_id))}</b>")
+    if promo_code:
+        lines.append(f"Промокод: <b>{escape_text(promo_code)}</b> (-{promo_percent}%)")
+    if loyalty_percent:
+        lines.append(f"Персональная скидка: <b>-{loyalty_percent}%</b>")
+    free_from = get_setting_int("free_delivery_from", 50000)
+    if cart_total(user_id) >= free_from:
+        lines.append("Доставка: <b>бесплатно</b>")
+    else:
+        lines.append(f"Бесплатная доставка от: <b>{money(free_from)}</b>")
     lines.append(f"Позиций: <b>{cart_count(user_id)}</b>")
     lines.append("")
     lines.append("Можно оформить заказ или бронь на 24 часа.")
@@ -1115,6 +1283,7 @@ def main_menu(user_id: int) -> ReplyKeyboardMarkup:
         [KeyboardButton(text="🆕 Новинки"), KeyboardButton(text="🔎 Поиск")],
         [KeyboardButton(text="❤️ Избранное"), KeyboardButton(text="🧺 Корзина")],
         [KeyboardButton(text="📦 Мои заказы и брони"), KeyboardButton(text="💬 Менеджер")],
+        [KeyboardButton(text="🎟 Промокод"), KeyboardButton(text="🎉 Акции")],
         [KeyboardButton(text="🚚 Доставка"), KeyboardButton(text="ℹ️ О магазине")],
     ]
     if is_admin(user_id):
@@ -1225,10 +1394,13 @@ def cart_kb(items) -> InlineKeyboardMarkup:
 
 
 def history_kb(items) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text=f"{order_type_label(item['type'])} #{int(item['id'])} • {status_label(item['status'])}", callback_data=f"sale:view:{int(item['id'])}")]
-        for item in items
-    ]
+    rows = []
+    for item in items:
+        oid = int(item['id'])
+        rows.append([InlineKeyboardButton(text=f"{order_type_label(item['type'])} #{oid} • {status_label(item['status'])}", callback_data=f"sale:view:{oid}")])
+        rows.append([InlineKeyboardButton(text="🔁 Повторить", callback_data=f"sale:repeat:{oid}")])
+        if item['type'] == 'reservation' and item['status'] == 'new':
+            rows.append([InlineKeyboardButton(text="⏳ Продлить на 24ч", callback_data=f"sale:extend:{oid}")])
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else InlineKeyboardMarkup(inline_keyboard=[])
 
 
@@ -1268,6 +1440,13 @@ def admin_kb() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="📤 Экспорт CSV", callback_data="admin:export"),
                 InlineKeyboardButton(text="💾 Бэкап БД", callback_data="admin:backup"),
+            ],
+            [
+                InlineKeyboardButton(text="⏰ Истекают сегодня", callback_data="admin:expiring"),
+                InlineKeyboardButton(text="📣 Рассылка", callback_data="admin:broadcast"),
+            ],
+            [
+                InlineKeyboardButton(text="💸 Массово изменить цены", callback_data="admin:mass_price"),
             ],
         ]
     )
@@ -1390,7 +1569,7 @@ async def expire_reservations_job(bot: Bot) -> None:
                     f"⌛ <b>Бронь #{row['id']}</b> автоматически отменена, потому что истёк срок {RESERVATION_HOURS} часа(ов)."
                 )
                 await safe_send_user_message(bot, int(row["user_id"]), text)
-                for admin_id in admin_recipient_ids():
+                for admin_id in ADMIN_IDS:
                     if admin_id != int(row["user_id"]):
                         await safe_send_user_message(bot, admin_id, f"⌛ Истекла бронь #{row['id']}. Остаток возвращён на склад.")
         except Exception as exc:
@@ -1398,6 +1577,88 @@ async def expire_reservations_job(bot: Bot) -> None:
 
         await asyncio.sleep(60)
 
+
+
+
+async def reservation_reminders_job(bot: Bot) -> None:
+    while True:
+        try:
+            with closing(db()) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM orders
+                    WHERE type = 'reservation'
+                      AND status = 'new'
+                      AND expires_at <> ''
+                    """
+                ).fetchall()
+            for row in rows:
+                try:
+                    expires = datetime.strptime(row['expires_at'], "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    continue
+                diff = (expires - now_dt()).total_seconds()
+                if 3600 <= diff <= 7200 and 'reminded_2h' not in str(row['comment']):
+                    await safe_send_user_message(bot, int(row['user_id']), f"⏰ Напоминание: бронь #{int(row['id'])} истекает в ближайшие 1–2 часа.")
+                    with closing(db()) as conn:
+                        conn.execute("UPDATE orders SET comment = ? WHERE id = ?", (str(row['comment']) + ' reminded_2h', int(row['id'])))
+                        conn.commit()
+        except Exception as exc:
+            logging.exception("Reservation reminder job failed: %s", exc)
+        await asyncio.sleep(600)
+
+
+async def abandoned_cart_job(bot: Bot) -> None:
+    while True:
+        try:
+            threshold = now_dt() - timedelta(hours=2)
+            with closing(db()) as conn:
+                rows = conn.execute("SELECT * FROM cart_meta WHERE reminded = 0").fetchall()
+            for row in rows:
+                try:
+                    updated = datetime.strptime(row['updated_at'], "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    continue
+                if updated <= threshold and cart_count(int(row['user_id'])) > 0:
+                    await safe_send_user_message(bot, int(row['user_id']), "🛒 Вы добавили товары в корзину, но не оформили заказ. Корзина всё ещё ждёт вас.")
+                    with closing(db()) as conn:
+                        conn.execute("UPDATE cart_meta SET reminded = 1 WHERE user_id = ?", (int(row['user_id']),))
+                        conn.commit()
+        except Exception as exc:
+            logging.exception("Abandoned cart job failed: %s", exc)
+        await asyncio.sleep(900)
+
+
+async def daily_report_job(bot: Bot) -> None:
+    last_day = ""
+    while True:
+        try:
+            current_day = now_dt().strftime("%Y-%m-%d")
+            current_hour = now_dt().hour
+            if current_hour == 21 and current_day != last_day:
+                with closing(db()) as conn:
+                    orders = conn.execute("SELECT COUNT(*) AS c FROM orders WHERE type='order' AND created_at LIKE ?", (f"{current_day}%",)).fetchone()['c']
+                    reservations = conn.execute("SELECT COUNT(*) AS c FROM orders WHERE type='reservation' AND created_at LIKE ?", (f"{current_day}%",)).fetchone()['c']
+                    revenue = conn.execute("SELECT COALESCE(SUM(total),0) AS s FROM orders WHERE type='order' AND created_at LIKE ?", (f"{current_day}%",)).fetchone()['s']
+                for admin_id in ADMIN_IDS:
+                    await safe_send_user_message(bot, admin_id, f"📊 Отчёт за день {current_day}\nЗаказов: {orders}\nБроней: {reservations}\nОборот: {money(int(revenue or 0))}")
+                last_day = current_day
+        except Exception as exc:
+            logging.exception("Daily report job failed: %s", exc)
+        await asyncio.sleep(300)
+
+
+async def hide_old_out_of_stock_job() -> None:
+    while True:
+        try:
+            days = max(1, get_setting_int('hide_out_of_stock_after_days', 30))
+            border = (now_dt() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+            with closing(db()) as conn:
+                conn.execute("UPDATE products SET active = 0 WHERE stock <= 0 AND updated_at <> '' AND updated_at <= ?", (border,))
+                conn.commit()
+        except Exception as exc:
+            logging.exception("Hide old out-of-stock job failed: %s", exc)
+        await asyncio.sleep(3600)
 
 # =========================
 # USER HANDLERS
@@ -1424,9 +1685,28 @@ async def help_handler(message: Message) -> None:
     await message.answer(
         "/start — открыть магазин\n"
         "/menu — главное меню\n"
-        "/help — помощь",
+        "/help — помощь\n"
+        "/promo КОД — применить промокод",
         reply_markup=main_menu(message.from_user.id),
     )
+
+
+
+
+async def promo_command(message: Message, state: FSMContext) -> None:
+    parts = (message.text or '').split(maxsplit=1)
+    if len(parts) == 2:
+        ok, text = set_user_promo(message.from_user.id, parts[1])
+        await message.answer(text, reply_markup=main_menu(message.from_user.id))
+        return
+    await state.set_state(PromoState.waiting_code)
+    await message.answer("Введите промокод.", reply_markup=cancel_menu())
+
+
+async def promo_input(message: Message, state: FSMContext) -> None:
+    ok, text = set_user_promo(message.from_user.id, (message.text or '').strip())
+    await state.clear()
+    await message.answer(text, reply_markup=main_menu(message.from_user.id))
 
 
 async def cancel_handler(message: Message, state: FSMContext) -> None:
@@ -1481,11 +1761,10 @@ async def history_open(message: Message) -> None:
     await message.answer("Открыть карточку:", reply_markup=history_kb(items))
 
 
-async def checkout_start(message: Message, state: FSMContext, sale_type: str, user_id: Optional[int] = None) -> None:
-    actual_user_id = int(user_id or (message.from_user.id if message.from_user else 0))
-    ok, error = validate_cart_stock(actual_user_id)
+async def checkout_start(message: Message, state: FSMContext, sale_type: str) -> None:
+    ok, error = validate_cart_stock(message.from_user.id)
     if not ok:
-        await message.answer(error, reply_markup=main_menu(actual_user_id))
+        await message.answer(error, reply_markup=main_menu(message.from_user.id))
         return
 
     await state.clear()
@@ -1654,7 +1933,7 @@ async def checkout_comment(message: Message, state: FSMContext, bot: Bot) -> Non
 
     order_id = int(sale["id"])
     admin_markup = admin_sale_actions_kb(order_id, "new")
-    for admin_id in admin_recipient_ids():
+    for admin_id in ADMIN_IDS:
         try:
             await bot.send_message(admin_id, admin_text, reply_markup=admin_markup)
         except Exception as exc:
@@ -1710,7 +1989,7 @@ async def text_menu(message: Message, state: FSMContext) -> None:
         await message.answer(
             f"💬 <b>Менеджер</b>\n\n"
             f"Имя: {escape_text(MANAGER_NAME)}\n"
-            f"Контакт: {escape_text(manager_display())}\n"
+            f"Username: @{escape_text(MANAGER_USERNAME or 'manager')}\n"
             f"Телефон: {escape_text(SHOP_PHONE)}",
             reply_markup=main_menu(message.from_user.id),
         )
@@ -1719,6 +1998,18 @@ async def text_menu(message: Message, state: FSMContext) -> None:
     if text == "🚚 Доставка":
         await state.clear()
         await message.answer(DELIVERY_TEXT, reply_markup=main_menu(message.from_user.id))
+        return
+
+    if text == "🎟 Промокод":
+        await promo_command(message, state)
+        return
+
+    if text == "🎉 Акции":
+        await state.clear()
+        await message.answer(
+            "🎉 <b>Акции магазина</b>\n\n• Промокод <b>WELCOME10</b> — скидка 10%\n• Бесплатная доставка от суммы, указанной в настройках\n• Постоянным клиентам начисляется персональная скидка",
+            reply_markup=main_menu(message.from_user.id),
+        )
         return
 
     if text == "ℹ️ О магазине":
@@ -1794,6 +2085,9 @@ async def callback_product(callback: CallbackQuery) -> None:
         return
     if callback.message:
         await send_product_message(callback.message, product, callback.from_user.id)
+        similar = [x for x in get_products(category=str(product['category'])) if int(x['id']) != int(product['id'])][:3]
+        if similar:
+            await callback.message.answer("Похожие товары:", reply_markup=products_kb(similar))
 
 
 async def callback_add(callback: CallbackQuery) -> None:
@@ -1807,16 +2101,9 @@ async def callback_add(callback: CallbackQuery) -> None:
     if callback.message:
         product = get_product(product_id)
         if product:
-            count = cart_count(callback.from_user.id)
             await callback.message.answer(
-                ("✅ " if ok else "⚠️ ") + escape_text(text) + (f"\nСейчас в корзине: <b>{count}</b> шт." if ok else "")
+                ("✅ " if ok else "⚠️ ") + escape_text(text) + (f"\nСейчас в корзине: <b>{cart_count(callback.from_user.id)}</b> шт." if ok else "")
             )
-            if ok:
-                items = cart_items(callback.from_user.id)
-                await callback.message.answer(
-                    cart_text(callback.from_user.id),
-                    reply_markup=cart_kb(items) if items else None,
-                )
 
 
 async def callback_favorite(callback: CallbackQuery) -> None:
@@ -1880,19 +2167,8 @@ async def callback_checkout_start(callback: CallbackQuery, state: FSMContext) ->
     sale_type = callback.data.split(":", 1)[1]
     if sale_type not in {"order", "reservation"}:
         return
-    ok, error = validate_cart_stock(callback.from_user.id)
-    if not ok:
-        if callback.message:
-            await callback.message.answer(error, reply_markup=main_menu(callback.from_user.id))
-        return
-    await state.clear()
-    await state.update_data(sale_type=sale_type)
-    await state.set_state(CheckoutState.waiting_name)
     if callback.message:
-        await callback.message.answer(
-            f"✅ <b>{'Оформление заказа' if sale_type == 'order' else 'Оформление брони'}</b>\n\nВведите ваше имя:",
-            reply_markup=cancel_menu(),
-        )
+        await checkout_start(callback.message, state, sale_type)
 
 
 async def callback_sale_view(callback: CallbackQuery) -> None:
@@ -1905,6 +2181,47 @@ async def callback_sale_view(callback: CallbackQuery) -> None:
         return
     if callback.message:
         await callback.message.answer(order_text(order))
+
+
+
+
+async def callback_sale_repeat(callback: CallbackQuery) -> None:
+    await callback.answer()
+    order_id = int(callback.data.split(":")[2])
+    order = get_order(order_id)
+    if not order or int(order["user_id"]) != callback.from_user.id:
+        if callback.message:
+            await callback.message.answer("Запись не найдена.")
+        return
+    cart_clear(callback.from_user.id)
+    items = get_order_items(order_id)
+    added = 0
+    for item in items:
+        ok, _ = cart_add(callback.from_user.id, int(item['product_id']), int(item['quantity']))
+        if ok:
+            added += int(item['quantity'])
+    if callback.message:
+        await callback.message.answer(f"Повтор заказа добавлен в корзину: {added} шт.")
+        current = cart_items(callback.from_user.id)
+        await callback.message.answer(cart_text(callback.from_user.id), reply_markup=cart_kb(current))
+
+
+async def callback_sale_extend(callback: CallbackQuery, bot: Bot) -> None:
+    await callback.answer()
+    order_id = int(callback.data.split(":")[2])
+    with closing(db()) as conn:
+        row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+        if not row or int(row['user_id']) != callback.from_user.id or row['type'] != 'reservation' or row['status'] != 'new':
+            if callback.message:
+                await callback.message.answer("Бронь нельзя продлить.")
+            return
+        new_exp = (datetime.strptime(row['expires_at'], "%Y-%m-%d %H:%M:%S") + timedelta(hours=RESERVATION_HOURS)).strftime("%Y-%m-%d %H:%M:%S") if row['expires_at'] else (now_dt() + timedelta(hours=RESERVATION_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("UPDATE orders SET expires_at = ?, updated_at = ? WHERE id = ?", (new_exp, now_str(), order_id))
+        conn.commit()
+    if callback.message:
+        await callback.message.answer(f"Бронь #{order_id} продлена до {human_dt(new_exp)}")
+    for admin_id in ADMIN_IDS:
+        await safe_send_user_message(bot, admin_id, f"⏳ Клиент продлил бронь #{order_id} до {human_dt(new_exp)}")
 
 
 async def noop_handler(callback: CallbackQuery) -> None:
@@ -2342,6 +2659,77 @@ async def callback_admin_backup(callback: CallbackQuery) -> None:
             await callback.message.answer_document(FSInputFile(LOG_PATH, filename=Path(LOG_PATH).name))
 
 
+
+
+async def callback_admin_expiring(callback: CallbackQuery) -> None:
+    if not await admin_guard(callback):
+        return
+    await callback.answer()
+    today = now_dt().strftime("%Y-%m-%d")
+    with closing(db()) as conn:
+        rows = conn.execute(
+            "SELECT * FROM orders WHERE type = 'reservation' AND status = 'new' AND expires_at LIKE ? ORDER BY expires_at ASC",
+            (f"{today}%",),
+        ).fetchall()
+    if callback.message:
+        if not rows:
+            await callback.message.answer("Сегодня истекающих броней нет.")
+            return
+        for row in rows[:20]:
+            await callback.message.answer(order_text(row), reply_markup=admin_sale_actions_kb(int(row['id']), row['status']))
+
+
+async def callback_admin_mass_price_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await admin_guard(callback):
+        return
+    await callback.answer()
+    await state.set_state(AdminMassPriceState.waiting_percent)
+    if callback.message:
+        await callback.message.answer("Введите процент изменения цены. Примеры: <b>10</b> или <b>-15</b>", reply_markup=cancel_menu())
+
+
+async def admin_mass_price_input(message: Message, state: FSMContext) -> None:
+    try:
+        percent = int((message.text or '').strip())
+    except Exception:
+        await message.answer("Введите целое число, например 10 или -5.")
+        return
+    with closing(db()) as conn:
+        rows = conn.execute("SELECT id, price FROM products WHERE active = 1").fetchall()
+        for row in rows:
+            new_price = max(1, int(int(row['price']) * (100 + percent) / 100))
+            conn.execute("UPDATE products SET price = ?, updated_at = ? WHERE id = ?", (new_price, now_str(), int(row['id'])))
+        conn.commit()
+    await state.clear()
+    await message.answer(f"Готово. Цены изменены на {percent}%.", reply_markup=main_menu(message.from_user.id))
+
+
+async def callback_admin_broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await admin_guard(callback):
+        return
+    await callback.answer()
+    await state.set_state(AdminBroadcastState.waiting_text)
+    if callback.message:
+        await callback.message.answer("Отправьте текст рассылки для клиентов.", reply_markup=cancel_menu())
+
+
+async def admin_broadcast_input(message: Message, state: FSMContext, bot: Bot) -> None:
+    text = (message.text or '').strip()
+    if len(text) < 3:
+        await message.answer("Текст слишком короткий.")
+        return
+    await state.clear()
+    with closing(db()) as conn:
+        users = conn.execute("SELECT user_id FROM customers ORDER BY updated_at DESC").fetchall()
+    sent = 0
+    for row in users:
+        try:
+            await bot.send_message(int(row['user_id']), f"📣 <b>Новость от {SHOP_NAME}</b>\n\n{escape_text(text)}")
+            sent += 1
+        except Exception:
+            pass
+    await message.answer(f"Рассылка завершена. Отправлено: {sent}", reply_markup=main_menu(message.from_user.id))
+
 # =========================
 # MAIN
 # =========================
@@ -2361,9 +2749,11 @@ async def main() -> None:
     dp.message.register(start_handler, CommandStart())
     dp.message.register(menu_handler, Command("menu"))
     dp.message.register(help_handler, Command("help"))
+    dp.message.register(promo_command, Command("promo"))
     dp.message.register(cancel_handler, F.text == "❌ Отмена")
 
     dp.message.register(search_input, SearchState.waiting_query)
+    dp.message.register(promo_input, PromoState.waiting_code)
 
     dp.message.register(checkout_name, CheckoutState.waiting_name)
     dp.message.register(checkout_phone_contact, CheckoutState.waiting_phone, F.contact)
@@ -2387,6 +2777,8 @@ async def main() -> None:
     dp.callback_query.register(callback_cart_clear, F.data == "cart:clear")
     dp.callback_query.register(callback_checkout_start, F.data.startswith("checkout:"))
     dp.callback_query.register(callback_sale_view, F.data.startswith("sale:view:"))
+    dp.callback_query.register(callback_sale_repeat, F.data.startswith("sale:repeat:"))
+    dp.callback_query.register(callback_sale_extend, F.data.startswith("sale:extend:"))
 
     dp.callback_query.register(callback_admin_back, F.data == "admin:back")
     dp.callback_query.register(callback_admin_stats, F.data == "admin:stats")
@@ -2401,6 +2793,9 @@ async def main() -> None:
     dp.callback_query.register(callback_admin_search_start, F.data == "admin:search")
     dp.callback_query.register(callback_admin_export, F.data == "admin:export")
     dp.callback_query.register(callback_admin_backup, F.data == "admin:backup")
+    dp.callback_query.register(callback_admin_expiring, F.data == "admin:expiring")
+    dp.callback_query.register(callback_admin_broadcast_start, F.data == "admin:broadcast")
+    dp.callback_query.register(callback_admin_mass_price_start, F.data == "admin:mass_price")
 
     dp.message.register(admin_add_product_title, AdminProductAddState.waiting_title)
     dp.message.register(admin_add_product_price, AdminProductAddState.waiting_price)
@@ -2414,10 +2809,16 @@ async def main() -> None:
     dp.message.register(admin_edit_product_photo, AdminProductEditState.waiting_value, F.photo)
     dp.message.register(admin_edit_product_value, AdminProductEditState.waiting_value, F.text)
     dp.message.register(admin_search_input, AdminOrderSearchState.waiting_query)
+    dp.message.register(admin_mass_price_input, AdminMassPriceState.waiting_percent)
+    dp.message.register(admin_broadcast_input, AdminBroadcastState.waiting_text)
 
     dp.message.register(text_menu, F.text)
 
     asyncio.create_task(expire_reservations_job(bot))
+    asyncio.create_task(reservation_reminders_job(bot))
+    asyncio.create_task(abandoned_cart_job(bot))
+    asyncio.create_task(daily_report_job(bot))
+    asyncio.create_task(hide_old_out_of_stock_job())
     await dp.start_polling(bot)
 
 
