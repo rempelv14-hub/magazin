@@ -27,14 +27,13 @@ from aiogram.types import (
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "PASTE_BOT_TOKEN_HERE")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "6954213997"))
-MANAGER_ID = int(os.getenv("MANAGER_ID", "6954213997"))
-SUPPORT_ID = int(os.getenv("SUPPORT_ID", "6954213997"))
 SHOP_NAME = os.getenv("SHOP_NAME", "ShopBron")
 SHOP_TAGLINE = os.getenv("SHOP_TAGLINE", "Премиальный магазин прямо в Telegram")
 SHOP_PHONE = os.getenv("SHOP_PHONE", "+7 700 000 00 00")
-MANAGER_NAME = os.getenv("MANAGER_NAME", "Администратор магазина")
+MANAGER_NAME = os.getenv("MANAGER_NAME", "Персональный менеджер")
+MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "shopbron_manager").replace("@", "")
 CURRENCY = os.getenv("CURRENCY", "₸")
 DB_PATH = os.getenv("DB_PATH", "premium_shop.db")
 
@@ -56,14 +55,11 @@ ABOUT_TEXT = f"""ℹ️ <b>{SHOP_NAME}</b>
 {SHOP_TAGLINE}
 
 📞 Телефон: {SHOP_PHONE}
-👤 Менеджер ID: {MANAGER_ID}
-🛟 Поддержка ID: {SUPPORT_ID}
-🛠 Админ ID: {ADMIN_ID}"""
+💬 Менеджер: @{MANAGER_USERNAME}"""
 
 
 # =========================
 # DEMO PRODUCTS
-# photo: можно вставить прямую ссылку на фото товара
 # =========================
 DEMO_PRODUCTS = [
     {
@@ -418,11 +414,7 @@ def get_recent_orders(limit: int = 5):
 
 
 def manager_url() -> str:
-    return f"tg://user?id={MANAGER_ID}"
-
-
-def support_url() -> str:
-    return f"tg://user?id={SUPPORT_ID}"
+    return f"https://t.me/{MANAGER_USERNAME}" if MANAGER_USERNAME else "https://t.me"
 
 
 def product_caption(product: sqlite3.Row) -> str:
@@ -434,23 +426,16 @@ def product_caption(product: sqlite3.Row) -> str:
     badge = f" [{' • '.join(marks)}]" if marks else ""
 
     return (
-        f"<b>{escape_text(product['title'])}</b>{badge}
-
-"
-        f"💵 Цена: <b>{money(int(product['price']))}</b>
-"
-        f"📂 Категория: {escape_text(product['category'])}
-
-"
+        f"<b>{escape_text(product['title'])}</b>{badge}\n\n"
+        f"💵 Цена: <b>{money(int(product['price']))}</b>\n"
+        f"📂 Категория: {escape_text(product['category'])}\n\n"
         f"{escape_text(product['description'])}"
     )
 
 
 def products_text(title: str, items) -> str:
     if not items:
-        return f"<b>{escape_text(title)}</b>
-
-Пока в этом разделе ничего нет."
+        return f"<b>{escape_text(title)}</b>\n\nПока в этом разделе ничего нет."
 
     lines = [f"<b>{escape_text(title)}</b>", ""]
     for item in items:
@@ -464,16 +449,13 @@ def products_text(title: str, items) -> str:
 
     lines.append("")
     lines.append("Нажмите на товар ниже, чтобы открыть карточку.")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 def cart_text(user_id: int) -> str:
     items = cart_items(user_id)
     if not items:
-        return "🧺 <b>Корзина пуста</b>
-
-Добавьте товары из каталога, а потом оформите заявку."
+        return "🧺 <b>Корзина пуста</b>\n\nДобавьте товары из каталога, а потом оформите заявку."
 
     lines = ["🧺 <b>Ваша корзина</b>", ""]
     for idx, item in enumerate(items, start=1):
@@ -486,8 +468,7 @@ def cart_text(user_id: int) -> str:
     lines.append(f"Позиций: <b>{cart_count(user_id)}</b>")
     lines.append("")
     lines.append("Нажмите <b>✅ Оформить</b>, чтобы отправить заказ админу.")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 def order_items_text(items) -> str:
@@ -498,8 +479,7 @@ def order_items_text(items) -> str:
         lines.append(
             f"{idx}. {escape_text(item['title'])} — {money(price)} × {qty} = {money(price * qty)}"
         )
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 def user_tag(user) -> str:
@@ -668,9 +648,7 @@ async def send_product_message(target: Message, product: sqlite3.Row) -> None:
 async def start_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
-        f"👋 Добро пожаловать в <b>{SHOP_NAME}</b>
-
-{SHOP_TAGLINE}",
+        f"👋 Добро пожаловать в <b>{SHOP_NAME}</b>\n\n{SHOP_TAGLINE}",
         reply_markup=main_menu(),
     )
 
@@ -682,9 +660,7 @@ async def menu_handler(message: Message, state: FSMContext) -> None:
 
 async def help_handler(message: Message) -> None:
     await message.answer(
-        "/start — открыть магазин
-/menu — главное меню
-/help — помощь",
+        "/start — открыть магазин\n/menu — главное меню\n/help — помощь",
         reply_markup=main_menu(),
     )
 
@@ -731,9 +707,7 @@ async def checkout_start_from_message(message: Message, state: FSMContext) -> No
 
     await state.set_state(CheckoutState.waiting_name)
     await message.answer(
-        "✅ <b>Оформление заявки</b>
-
-Введите ваше имя:",
+        "✅ <b>Оформление заявки</b>\n\nВведите ваше имя:",
         reply_markup=cancel_menu(),
     )
 
@@ -802,28 +776,15 @@ async def checkout_comment(message: Message, state: FSMContext, bot: Bot) -> Non
     await state.clear()
 
     admin_text = (
-        "🛍 <b>Новая заявка</b>
-
-"
-        f"🧾 Заказ: <b>#{order['order_id']}</b>
-"
-        f"⏰ Время: {escape_text(order['created_at'])}
-"
-        f"👤 Клиент: {user_tag(message.from_user)}
-"
-        f"Имя: {escape_text(data.get('customer_name', '-'))}
-"
-        f"Телефон: {escape_text(data.get('customer_phone', '-'))}
-"
-        f"Адрес: {escape_text(data.get('customer_address', '-'))}
-"
-        f"Комментарий: {escape_text(comment)}
-
-"
-        f"<b>Товары:</b>
-{order_items_text(order['items'])}
-
-"
+        "🛍 <b>Новая заявка</b>\n\n"
+        f"🧾 Заказ: <b>#{order['order_id']}</b>\n"
+        f"⏰ Время: {escape_text(order['created_at'])}\n"
+        f"👤 Клиент: {user_tag(message.from_user)}\n"
+        f"Имя: {escape_text(data.get('customer_name', '-'))}\n"
+        f"Телефон: {escape_text(data.get('customer_phone', '-'))}\n"
+        f"Адрес: {escape_text(data.get('customer_address', '-'))}\n"
+        f"Комментарий: {escape_text(comment)}\n\n"
+        f"<b>Товары:</b>\n{order_items_text(order['items'])}\n\n"
         f"💰 Итого: <b>{money(int(order['total']))}</b>"
     )
 
@@ -838,14 +799,7 @@ async def checkout_comment(message: Message, state: FSMContext, bot: Bot) -> Non
         return
 
     await message.answer(
-        f"🎉 Заявка <b>#{order['order_id']}</b> отправлена.
-
-"
-        f"Админ: <code>{ADMIN_ID}</code>
-"
-        f"Менеджер: <code>{MANAGER_ID}</code>
-"
-        f"Поддержка: <code>{SUPPORT_ID}</code>",
+        f"🎉 Заявка <b>#{order['order_id']}</b> отправлена.",
         reply_markup=main_menu(),
     )
 
@@ -894,27 +848,16 @@ async def text_menu(message: Message, state: FSMContext) -> None:
     if text == "💬 Менеджер":
         await state.clear()
         await message.answer(
-            f"💬 <b>Менеджер и поддержка</b>
-
-"
-            f"Имя: {escape_text(MANAGER_NAME)}
-"
-            f"Telegram ID менеджера: <code>{MANAGER_ID}</code>
-"
-            f"Telegram ID поддержки: <code>{SUPPORT_ID}</code>
-"
-            f"Telegram ID администратора: <code>{ADMIN_ID}</code>
-"
+            f"💬 <b>Менеджер</b>\n\n"
+            f"Имя: {escape_text(MANAGER_NAME)}\n"
+            f"Username: @{escape_text(MANAGER_USERNAME)}\n"
             f"Телефон: {escape_text(SHOP_PHONE)}",
             reply_markup=main_menu(),
         )
         await message.answer(
             "Быстрая связь:",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="Написать менеджеру", url=manager_url())],
-                    [InlineKeyboardButton(text="Поддержка", url=support_url())],
-                ]
+                inline_keyboard=[[InlineKeyboardButton(text="Написать менеджеру", url=manager_url())]]
             ),
         )
         return
@@ -942,13 +885,9 @@ async def text_menu(message: Message, state: FSMContext) -> None:
 
         stats = get_stats()
         await message.answer(
-            "⚙️ <b>Панель управления</b>
-
-"
-            f"Товаров: <b>{stats['products']}</b>
-"
-            f"Заказов: <b>{stats['orders']}</b>
-"
+            "⚙️ <b>Панель управления</b>\n\n"
+            f"Товаров: <b>{stats['products']}</b>\n"
+            f"Заказов: <b>{stats['orders']}</b>\n"
             f"Выручка: <b>{money(stats['revenue'])}</b>",
             reply_markup=main_menu(),
         )
@@ -1008,17 +947,18 @@ async def callback_product(callback: CallbackQuery) -> None:
 
 
 async def callback_add(callback: CallbackQuery) -> None:
-    await callback.answer("Товар добавлен в корзину")
     product_id = int(callback.data.split(":", 1)[1])
     product = get_product(product_id)
     if not product:
+        await callback.answer("Товар не найден", show_alert=True)
         return
 
     cart_add(callback.from_user.id, product_id, 1)
+    await callback.answer("Товар добавлен в корзину")
+
     if callback.message:
         await callback.message.answer(
-            f"✅ <b>{escape_text(product['title'])}</b> добавлен в корзину.
-"
+            f"✅ <b>{escape_text(product['title'])}</b> добавлен в корзину.\n"
             f"Сейчас в корзине: <b>{cart_count(callback.from_user.id)}</b> шт."
         )
 
@@ -1073,9 +1013,7 @@ async def callback_checkout_start(callback: CallbackQuery, state: FSMContext) ->
     await state.set_state(CheckoutState.waiting_name)
     if callback.message:
         await callback.message.answer(
-            "✅ <b>Оформление заявки</b>
-
-Введите ваше имя:",
+            "✅ <b>Оформление заявки</b>\n\nВведите ваше имя:",
             reply_markup=cancel_menu(),
         )
 
@@ -1089,13 +1027,9 @@ async def callback_admin_stats(callback: CallbackQuery) -> None:
     stats = get_stats()
     if callback.message:
         await callback.message.answer(
-            "📊 <b>Статистика магазина</b>
-
-"
-            f"Товаров: <b>{stats['products']}</b>
-"
-            f"Заказов: <b>{stats['orders']}</b>
-"
+            "📊 <b>Статистика магазина</b>\n\n"
+            f"Товаров: <b>{stats['products']}</b>\n"
+            f"Заказов: <b>{stats['orders']}</b>\n"
             f"Выручка: <b>{money(stats['revenue'])}</b>"
         )
 
@@ -1117,14 +1051,12 @@ async def callback_admin_orders(callback: CallbackQuery) -> None:
     lines = ["🧾 <b>Последние заказы</b>", ""]
     for order in orders:
         lines.append(
-            f"#{order['id']} • {escape_text(order['created_at'])}
-"
+            f"#{order['id']} • {escape_text(order['created_at'])}\n"
             f"{escape_text(order['customer_name'])} • {money(int(order['total']))}"
         )
         lines.append("")
 
-    await callback.message.answer("
-".join(lines))
+    await callback.message.answer("\n".join(lines))
 
 
 async def noop_handler(callback: CallbackQuery) -> None:
@@ -1138,8 +1070,8 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     init_db()
 
-    if BOT_TOKEN == "PASTE_BOT_TOKEN_HERE":
-        raise ValueError("Укажите BOT_TOKEN в переменных окружения или прямо в коде.")
+    if not BOT_TOKEN:
+        raise ValueError("Укажите BOT_TOKEN в переменных окружения.")
 
     bot = Bot(
         token=BOT_TOKEN,
