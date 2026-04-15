@@ -49,8 +49,9 @@ SHOP_PHONE = os.getenv("SHOP_PHONE", "+7 700 000 00 00")
 MANAGER_NAME = os.getenv("MANAGER_NAME", "Персональный менеджер")
 MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "shopbron_manager").replace("@", "").strip()
 CURRENCY = os.getenv("CURRENCY", "₸")
-DB_PATH = os.getenv("DB_PATH", "shop_store_v2.db")
-LOG_PATH = os.getenv("LOG_PATH", "shop_store.log")
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "shop_store_v2.db"))
+LOG_PATH = os.getenv("LOG_PATH", str(BASE_DIR / "shop_store.log"))
 RESERVATION_HOURS = int(os.getenv("RESERVATION_HOURS", "24"))
 SPAM_INTERVAL = float(os.getenv("SPAM_INTERVAL", "0.35"))
 SHOP_CITY = os.getenv("SHOP_CITY", "Ваш город")
@@ -219,6 +220,40 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
+def migrate_legacy_products(conn: sqlite3.Connection) -> None:
+    """Backfill stock/timestamps for databases created by the old bot version."""
+    title_to_stock = {item["title"]: int(item["stock"]) for item in DEMO_PRODUCTS}
+    now = now_str()
+
+    rows = conn.execute(
+        "SELECT id, title, stock, created_at, updated_at FROM products"
+    ).fetchall()
+
+    for row in rows:
+        updates: list[str] = []
+        params: list[object] = []
+
+        current_stock = int(row["stock"] or 0)
+        if current_stock <= 0 and row["title"] in title_to_stock:
+            updates.append("stock = ?")
+            params.append(title_to_stock[row["title"]])
+
+        if not str(row["created_at"] or "").strip():
+            updates.append("created_at = ?")
+            params.append(now)
+
+        if not str(row["updated_at"] or "").strip():
+            updates.append("updated_at = ?")
+            params.append(now)
+
+        if updates:
+            params.append(int(row["id"]))
+            conn.execute(
+                f"UPDATE products SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+
+
 def init_db() -> None:
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 
@@ -328,6 +363,8 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id)")
+
+        migrate_legacy_products(conn)
 
         now = now_str()
         count = conn.execute("SELECT COUNT(*) AS c FROM products").fetchone()["c"]
@@ -1757,9 +1794,16 @@ async def callback_add(callback: CallbackQuery) -> None:
     if callback.message:
         product = get_product(product_id)
         if product:
+            count = cart_count(callback.from_user.id)
             await callback.message.answer(
-                ("✅ " if ok else "⚠️ ") + escape_text(text) + (f"\nСейчас в корзине: <b>{cart_count(callback.from_user.id)}</b> шт." if ok else "")
+                ("✅ " if ok else "⚠️ ") + escape_text(text) + (f"\nСейчас в корзине: <b>{count}</b> шт." if ok else "")
             )
+            if ok:
+                items = cart_items(callback.from_user.id)
+                await callback.message.answer(
+                    cart_text(callback.from_user.id),
+                    reply_markup=cart_kb(items) if items else None,
+                )
 
 
 async def callback_favorite(callback: CallbackQuery) -> None:
