@@ -55,7 +55,7 @@ SHOP_NAME = os.getenv("SHOP_NAME", "ShopBron")
 SHOP_TAGLINE = os.getenv("SHOP_TAGLINE", "Премиальный магазин прямо в Telegram")
 SHOP_PHONE = os.getenv("SHOP_PHONE", "+7 700 000 00 00")
 MANAGER_NAME = os.getenv("MANAGER_NAME", "Персональный менеджер")
-MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "shopbron_manager").replace("@", "").strip()
+MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "").replace("@", "").strip()
 CURRENCY = os.getenv("CURRENCY", "₸")
 DB_PATH = os.getenv("DB_PATH", "shop_store_v2.db")
 LOG_PATH = os.getenv("LOG_PATH", "shop_store.log")
@@ -73,6 +73,7 @@ PAYMENT_METHODS = {
     "cash": "Наличными",
     "card": "Картой",
     "transfer": "Переводом",
+    "pay_later": "При получении / выдаче",
 }
 
 ORDER_STATUSES = {
@@ -98,13 +99,18 @@ DELIVERY_TEXT = f"""🚚 <b>Доставка</b>
 • После оформления менеджер свяжется с вами
 • При брони товар резервируется на {RESERVATION_HOURS} часа(ов)"""
 
-ABOUT_TEXT = f"""ℹ️ <b>{SHOP_NAME}</b>
+def manager_contact_label() -> str:
+    return f"@{MANAGER_USERNAME}" if MANAGER_USERNAME else f"ID {MANAGER_ID}"
 
-{SHOP_TAGLINE}
 
-📞 Телефон: {SHOP_PHONE}
-💬 Менеджер: @{MANAGER_USERNAME or 'manager'}
-👤 Главный админ: <code>{MAIN_ADMIN_ID}</code>"""
+def about_text() -> str:
+    return (
+        f"ℹ️ <b>{SHOP_NAME}</b>\n\n"
+        f"{SHOP_TAGLINE}\n\n"
+        f"📞 Телефон: {SHOP_PHONE}\n"
+        f"💬 Менеджер: {manager_contact_label()}\n"
+        f"👤 Главный админ: <code>{MAIN_ADMIN_ID}</code>"
+    )
 
 DEMO_PRODUCTS = [
     {
@@ -580,7 +586,9 @@ def clear_user_promo(user_id: int) -> None:
 
 
 def manager_url() -> str:
-    return f"https://t.me/{MANAGER_USERNAME}" if MANAGER_USERNAME else "https://t.me"
+    if MANAGER_USERNAME:
+        return f"https://t.me/{MANAGER_USERNAME}"
+    return f"tg://user?id={MANAGER_ID}"
 
 
 def throttle_ok(user_id: int, key: str) -> bool:
@@ -1761,10 +1769,10 @@ async def history_open(message: Message) -> None:
     await message.answer("Открыть карточку:", reply_markup=history_kb(items))
 
 
-async def checkout_start(message: Message, state: FSMContext, sale_type: str) -> None:
-    ok, error = validate_cart_stock(message.from_user.id)
+async def checkout_start(message: Message, state: FSMContext, sale_type: str, user_id: int) -> None:
+    ok, error = validate_cart_stock(user_id)
     if not ok:
-        await message.answer(error, reply_markup=main_menu(message.from_user.id))
+        await message.answer(error, reply_markup=main_menu(user_id))
         return
 
     await state.clear()
@@ -1989,7 +1997,7 @@ async def text_menu(message: Message, state: FSMContext) -> None:
         await message.answer(
             f"💬 <b>Менеджер</b>\n\n"
             f"Имя: {escape_text(MANAGER_NAME)}\n"
-            f"Username: @{escape_text(MANAGER_USERNAME or 'manager')}\n"
+            f"Контакт: {escape_text(manager_contact_label())}\n"
             f"Телефон: {escape_text(SHOP_PHONE)}",
             reply_markup=main_menu(message.from_user.id),
         )
@@ -2014,7 +2022,7 @@ async def text_menu(message: Message, state: FSMContext) -> None:
 
     if text == "ℹ️ О магазине":
         await state.clear()
-        await message.answer(ABOUT_TEXT, reply_markup=main_menu(message.from_user.id))
+        await message.answer(about_text(), reply_markup=main_menu(message.from_user.id))
         return
 
     if text == "⚙️ Админ-панель":
@@ -2168,7 +2176,7 @@ async def callback_checkout_start(callback: CallbackQuery, state: FSMContext) ->
     if sale_type not in {"order", "reservation"}:
         return
     if callback.message:
-        await checkout_start(callback.message, state, sale_type)
+        await checkout_start(callback.message, state, sale_type, callback.from_user.id)
 
 
 async def callback_sale_view(callback: CallbackQuery) -> None:
