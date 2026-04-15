@@ -226,8 +226,9 @@ class AdminBroadcastState(StatesGroup):
 # DATABASE
 # =========================
 def db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
@@ -371,7 +372,8 @@ def init_db() -> None:
                 total INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                expires_at TEXT DEFAULT ''
+                expires_at TEXT DEFAULT '',
+                reminder_sent INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -400,6 +402,7 @@ def init_db() -> None:
         ensure_column(conn, "orders", "payment_method", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "orders", "updated_at", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "orders", "expires_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "orders", "reminder_sent", "INTEGER NOT NULL DEFAULT 0")
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_products_active ON products(active, category)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, created_at)")
@@ -1045,21 +1048,31 @@ def restore_stock_for_sale(conn: sqlite3.Connection, order_id: int) -> None:
 
 
 def update_sale_status(order_id: int, new_status: str) -> tuple[bool, str]:
+    allowed_transitions = {
+        "new": {"confirmed", "cancelled", "issued"},
+        "confirmed": {"issued", "cancelled"},
+        "issued": set(),
+        "cancelled": set(),
+    }
+
     with closing(db()) as conn:
         row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
         if not row:
             return False, "Запись не найдена."
 
-        old_status = row["status"]
+        old_status = str(row["status"])
         if old_status == new_status:
             return True, "Статус уже установлен."
 
-        if old_status == "cancelled":
-            return False, "Отменённую запись повторно менять нельзя."
+        if new_status not in ORDER_STATUSES:
+            return False, "Неизвестный статус."
+
+        if new_status not in allowed_transitions.get(old_status, set()):
+            return False, f"Нельзя изменить статус с «{status_label(old_status)}» на «{status_label(new_status)}»."
 
         conn.execute("BEGIN")
         try:
-            if new_status == "cancelled":
+            if new_status == "cancelled" and old_status in {"new", "confirmed"}:
                 restore_stock_for_sale(conn, order_id)
             conn.execute(
                 "UPDATE orders SET status = ?, updated_at = ? WHERE id = ?",
@@ -1598,6 +1611,7 @@ async def reservation_reminders_job(bot: Bot) -> None:
                     WHERE type = 'reservation'
                       AND status = 'new'
                       AND expires_at <> ''
+                      AND reminder_sent = 0
                     """
                 ).fetchall()
             for row in rows:
@@ -1606,10 +1620,13 @@ async def reservation_reminders_job(bot: Bot) -> None:
                 except Exception:
                     continue
                 diff = (expires - now_dt()).total_seconds()
-                if 3600 <= diff <= 7200 and 'reminded_2h' not in str(row['comment']):
+                if 3600 <= diff <= 7200:
                     await safe_send_user_message(bot, int(row['user_id']), f"⏰ Напоминание: бронь #{int(row['id'])} истекает в ближайшие 1–2 часа.")
                     with closing(db()) as conn:
-                        conn.execute("UPDATE orders SET comment = ? WHERE id = ?", (str(row['comment']) + ' reminded_2h', int(row['id'])))
+                        conn.execute(
+                            "UPDATE orders SET reminder_sent = 1, updated_at = ? WHERE id = ?",
+                            (now_str(), int(row['id'])),
+                        )
                         conn.commit()
         except Exception as exc:
             logging.exception("Reservation reminder job failed: %s", exc)
@@ -2107,11 +2124,14 @@ async def callback_add(callback: CallbackQuery) -> None:
     ok, text = cart_add(callback.from_user.id, product_id, 1)
     await callback.answer("Добавлено" if ok else "Ошибка", show_alert=not ok)
     if callback.message:
-        product = get_product(product_id)
-        if product:
+        if ok:
+            items = cart_items(callback.from_user.id)
             await callback.message.answer(
-                ("✅ " if ok else "⚠️ ") + escape_text(text) + (f"\nСейчас в корзине: <b>{cart_count(callback.from_user.id)}</b> шт." if ok else "")
+                f"✅ {escape_text(text)}\nСейчас в корзине: <b>{cart_count(callback.from_user.id)}</b> шт."
             )
+            await callback.message.answer(cart_text(callback.from_user.id), reply_markup=cart_kb(items))
+        else:
+            await callback.message.answer(f"⚠️ {escape_text(text)}")
 
 
 async def callback_favorite(callback: CallbackQuery) -> None:
