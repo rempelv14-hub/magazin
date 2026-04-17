@@ -1,17 +1,11 @@
-
 import asyncio
-import csv
 import logging
 import os
-import re
 import sqlite3
-import tempfile
-import time
 from contextlib import closing
-from datetime import datetime, timedelta
+from datetime import datetime
 from html import escape
-from pathlib import Path
-from typing import Iterable, Optional
+from typing import List, Optional
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -21,9 +15,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    BufferedInputFile,
     CallbackQuery,
-    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -31,147 +23,112 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
+
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMIN_IDS = {
-    int(x.strip())
-    for x in os.getenv("ADMIN_IDS", "6954213997").split(",")
-    if x.strip().isdigit()
-}
-MAIN_ADMIN_ID = 6954213997
-MANAGER_ID = MAIN_ADMIN_ID
-ADMIN_IDS.add(MAIN_ADMIN_ID)
-
-MANAGER_IDS = {
-    int(x.strip())
-    for x in os.getenv("MANAGER_IDS", str(MAIN_ADMIN_ID)).split(",")
-    if x.strip().isdigit()
-}
-MANAGER_IDS.add(MAIN_ADMIN_ID)
-
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8588546241:AAGuHivJBcMueKkk6nrklygRviTbsb7-Qho")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "6954213997"))
 SHOP_NAME = os.getenv("SHOP_NAME", "ShopBron")
 SHOP_TAGLINE = os.getenv("SHOP_TAGLINE", "Премиальный магазин прямо в Telegram")
 SHOP_PHONE = os.getenv("SHOP_PHONE", "+7 700 000 00 00")
-MANAGER_NAME = os.getenv("MANAGER_NAME", "Персональный менеджер")
-MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "").replace("@", "").strip()
+MANAGER_NAME = os.getenv("MANAGER_NAME", "6954213997")
+MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "shopbron_manager").replace("@", "")
+SUPPORT_WHATSAPP = os.getenv("SUPPORT_WHATSAPP", "+77712841932")
+SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "rempelv14@gmail.con")
 CURRENCY = os.getenv("CURRENCY", "₸")
-DB_PATH = os.getenv("DB_PATH", "shop_store_v2.db")
-LOG_PATH = os.getenv("LOG_PATH", "shop_store.log")
-RESERVATION_HOURS = int(os.getenv("RESERVATION_HOURS", "24"))
-SPAM_INTERVAL = float(os.getenv("SPAM_INTERVAL", "0.35"))
-SHOP_CITY = os.getenv("SHOP_CITY", "Ваш город")
+DB_PATH = os.getenv("DB_PATH", "premium_shop.db")
 
-DELIVERY_METHODS = {
-    "pickup": "Самовывоз",
-    "courier_city": "Курьер по городу",
-    "courier_kz": "Доставка по Казахстану",
-}
+DELIVERY_TEXT = """🚚 <b>Доставка</b>
 
-PAYMENT_METHODS = {
-    "cash": "Наличными",
-    "card": "Картой",
-    "transfer": "Переводом",
-    "pay_later": "При получении / выдаче",
-}
-
-ORDER_STATUSES = {
-    "new": "Новая",
-    "confirmed": "Подтверждена",
-    "cancelled": "Отменена",
-    "issued": "Выдана",
-}
-
-ENTITY_LABEL = {
-    "order": "заказ",
-    "reservation": "бронь",
-}
-
-PHONE_RE = re.compile(r"^\+?[0-9 ()\-]{6,20}$")
-LAST_ACTION_TS: dict[tuple[int, str], float] = {}
-
-DELIVERY_TEXT = f"""🚚 <b>Доставка</b>
-
-• Самовывоз из магазина
-• По городу {SHOP_CITY}: в день заказа или на следующий день
+• По городу: в день заказа или на следующий день
 • По Казахстану: 2–5 рабочих дней
-• После оформления менеджер свяжется с вами
-• При брони товар резервируется на {RESERVATION_HOURS} часа(ов)"""
+• Оплата: перевод, карта, наличные при получении
+• После оформления менеджер свяжется с вами"""
 
-def manager_contact_label() -> str:
-    return f"@{MANAGER_USERNAME}" if MANAGER_USERNAME else f"ID {MANAGER_ID}"
+REVIEWS_TEXT = """⭐ <b>Отзывы</b>
+
+— Всё пришло быстро и красиво упаковано
+— Качество отличное, менеджер отвечает быстро
+— Оформление заказа заняло меньше минуты"""
+
+ABOUT_TEXT = f"""ℹ️ <b>{SHOP_NAME}</b>
+
+{SHOP_TAGLINE}
+
+📞 Телефон: {SHOP_PHONE}
+💬 Telegram: @{MANAGER_USERNAME}
+📱 WhatsApp: {SUPPORT_WHATSAPP}
+📧 Email: {SUPPORT_EMAIL}"""
+
+SUPPORT_TEXT = f"""🛟 <b>Техподдержка</b>
+
+Выберите удобный способ связи:
+
+📱 WhatsApp: {SUPPORT_WHATSAPP}
+📧 Email: {SUPPORT_EMAIL}
+💬 Telegram: @{MANAGER_USERNAME}
+📞 Телефон: {SHOP_PHONE}"""
 
 
-def about_text() -> str:
-    return (
-        f"ℹ️ <b>{SHOP_NAME}</b>\n\n"
-        f"{SHOP_TAGLINE}\n\n"
-        f"📞 Телефон: {SHOP_PHONE}\n"
-        f"💬 Менеджер: {manager_contact_label()}\n"
-        f"👤 Главный админ: <code>{MAIN_ADMIN_ID}</code>"
-    )
-
+# =========================
+# DEMO PRODUCTS
+# photo: можно вставить прямую ссылку на фото товара
+# =========================
 DEMO_PRODUCTS = [
     {
         "title": "Смарт-часы FitTime Pro",
         "price": 31990,
         "category": "Гаджеты",
-        "description": "Стильные смарт-часы с уведомлениями, шагомером и премиальным дизайном.",
+        "description": "Стильные смарт-часы с уведомлениями, шагомером, мониторингом сна и премиальным дизайном.",
         "photo": "",
         "is_hit": 1,
         "is_new": 0,
-        "stock": 8,
     },
     {
         "title": "Наушники AirSound X1",
         "price": 24990,
         "category": "Аудио",
-        "description": "Беспроводные наушники с глубоким звуком и шумоподавлением.",
+        "description": "Беспроводные наушники с глубоким звуком, шумоподавлением и удобной посадкой.",
         "photo": "",
         "is_hit": 1,
         "is_new": 0,
-        "stock": 14,
     },
     {
         "title": "Портативная колонка BeatBox Mini",
         "price": 17990,
         "category": "Аудио",
-        "description": "Компактная колонка с мощным звуком и хорошей автономностью.",
+        "description": "Компактная колонка с мощным звуком, Bluetooth и хорошей автономностью.",
         "photo": "",
         "is_hit": 1,
         "is_new": 0,
-        "stock": 5,
     },
     {
         "title": "Рюкзак Urban Move",
         "price": 22990,
         "category": "Аксессуары",
-        "description": "Городской рюкзак с защитой от влаги и карманом для ноутбука.",
+        "description": "Городской рюкзак с защитой от влаги и отдельным карманом для ноутбука.",
         "photo": "",
         "is_hit": 0,
         "is_new": 1,
-        "stock": 9,
     },
     {
         "title": "Power Bank VoltMax 20000",
         "price": 19990,
         "category": "Гаджеты",
-        "description": "Ёмкий внешний аккумулятор с быстрой зарядкой.",
+        "description": "Ёмкий внешний аккумулятор с быстрой зарядкой и стильным корпусом.",
         "photo": "",
         "is_hit": 0,
         "is_new": 1,
-        "stock": 12,
     },
     {
         "title": "Термокружка Steel Heat",
         "price": 8990,
         "category": "Аксессуары",
-        "description": "Держит тепло до 6 часов. Отличный вариант для города и авто.",
+        "description": "Держит тепло до 6 часов. Удобный формат для города, авто и офиса.",
         "photo": "",
         "is_hit": 0,
         "is_new": 1,
-        "stock": 18,
     },
 ]
 
@@ -186,77 +143,21 @@ class SearchState(StatesGroup):
 class CheckoutState(StatesGroup):
     waiting_name = State()
     waiting_phone = State()
-    waiting_delivery = State()
-    waiting_payment = State()
     waiting_address = State()
     waiting_comment = State()
-
-
-class AdminProductAddState(StatesGroup):
-    waiting_title = State()
-    waiting_price = State()
-    waiting_category = State()
-    waiting_description = State()
-    waiting_photo = State()
-    waiting_stock = State()
-    waiting_flags = State()
-
-
-class AdminProductEditState(StatesGroup):
-    waiting_value = State()
-
-
-class AdminOrderSearchState(StatesGroup):
-    waiting_query = State()
-
-
-class PromoState(StatesGroup):
-    waiting_code = State()
-
-
-class AdminMassPriceState(StatesGroup):
-    waiting_percent = State()
-
-
-class AdminBroadcastState(StatesGroup):
-    waiting_text = State()
-
-
-class AdminImportCsvState(StatesGroup):
-    waiting_file = State()
 
 
 # =========================
 # DATABASE
 # =========================
 def db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=15)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
-
-
-def table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (table,),
-    ).fetchone()
-    return row is not None
-
-
-def ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
-    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-    if column not in columns:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+    return sqlite3.connect(DB_PATH)
 
 
 def init_db() -> None:
-    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-
     with closing(db()) as conn:
-        conn.execute("PRAGMA foreign_keys = ON")
-
-        conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             """
             CREATE TABLE IF NOT EXISTS products (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -267,15 +168,11 @@ def init_db() -> None:
                 photo TEXT DEFAULT '',
                 is_hit INTEGER DEFAULT 0,
                 is_new INTEGER DEFAULT 0,
-                stock INTEGER NOT NULL DEFAULT 0,
-                active INTEGER DEFAULT 1,
-                created_at TEXT NOT NULL DEFAULT '',
-                updated_at TEXT NOT NULL DEFAULT ''
+                active INTEGER DEFAULT 1
             )
             """
         )
-
-        conn.execute(
+        cur.execute(
             """
             CREATE TABLE IF NOT EXISTS carts (
                 user_id INTEGER NOT NULL,
@@ -285,116 +182,21 @@ def init_db() -> None:
             )
             """
         )
-
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS favorites (
-                user_id INTEGER NOT NULL,
-                product_id INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (user_id, product_id)
-            )
-            """
-        )
-
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS customers (
-                user_id INTEGER PRIMARY KEY,
-                full_name TEXT DEFAULT '',
-                username TEXT DEFAULT '',
-                phone TEXT DEFAULT '',
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-            """
-        )
-
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS promo_codes (
-                code TEXT PRIMARY KEY,
-                discount_percent INTEGER NOT NULL DEFAULT 0,
-                active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS user_active_promos (
-                user_id INTEGER PRIMARY KEY,
-                code TEXT NOT NULL,
-                discount_percent INTEGER NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS roles (
-                user_id INTEGER PRIMARY KEY,
-                role TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS cart_meta (
-                user_id INTEGER PRIMARY KEY,
-                updated_at TEXT NOT NULL,
-                reminded INTEGER NOT NULL DEFAULT 0
-            )
-            """
-        )
-
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS import_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                imported_by INTEGER NOT NULL,
-                imported_at TEXT NOT NULL,
-                rows_count INTEGER NOT NULL DEFAULT 0,
-                note TEXT NOT NULL DEFAULT ''
-            )
-            """
-        )
-
-        conn.execute(
+        cur.execute(
             """
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
-                type TEXT NOT NULL DEFAULT 'order',
-                status TEXT NOT NULL DEFAULT 'new',
-                customer_name TEXT NOT NULL DEFAULT '',
-                phone TEXT NOT NULL DEFAULT '',
-                delivery_method TEXT NOT NULL DEFAULT '',
-                payment_method TEXT NOT NULL DEFAULT '',
-                address TEXT NOT NULL DEFAULT '',
-                comment TEXT NOT NULL DEFAULT '',
-                total INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                expires_at TEXT DEFAULT '',
-                reminder_sent INTEGER NOT NULL DEFAULT 0
+                customer_name TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                address TEXT NOT NULL,
+                comment TEXT NOT NULL,
+                total INTEGER NOT NULL,
+                created_at TEXT NOT NULL
             )
             """
         )
-
-        conn.execute(
+        cur.execute(
             """
             CREATE TABLE IF NOT EXISTS order_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -402,70 +204,20 @@ def init_db() -> None:
                 product_id INTEGER NOT NULL,
                 title TEXT NOT NULL,
                 price INTEGER NOT NULL,
-                quantity INTEGER NOT NULL,
-                FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+                quantity INTEGER NOT NULL
             )
             """
         )
 
-        ensure_column(conn, "products", "stock", "INTEGER NOT NULL DEFAULT 0")
-        ensure_column(conn, "products", "created_at", "TEXT NOT NULL DEFAULT ''")
-        ensure_column(conn, "products", "updated_at", "TEXT NOT NULL DEFAULT ''")
-
-        ensure_column(conn, "orders", "type", "TEXT NOT NULL DEFAULT 'order'")
-        ensure_column(conn, "orders", "status", "TEXT NOT NULL DEFAULT 'new'")
-        ensure_column(conn, "orders", "delivery_method", "TEXT NOT NULL DEFAULT ''")
-        ensure_column(conn, "orders", "payment_method", "TEXT NOT NULL DEFAULT ''")
-        ensure_column(conn, "orders", "updated_at", "TEXT NOT NULL DEFAULT ''")
-        ensure_column(conn, "orders", "expires_at", "TEXT DEFAULT ''")
-        ensure_column(conn, "orders", "reminder_sent", "INTEGER NOT NULL DEFAULT 0")
-
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_products_active ON products(active, category)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, created_at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, type)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id)")
-
-        now = now_str()
-        count = conn.execute("SELECT COUNT(*) AS c FROM products").fetchone()["c"]
+        count = cur.execute("SELECT COUNT(*) FROM products").fetchone()[0]
         if count == 0:
-            conn.executemany(
+            cur.executemany(
                 """
-                INSERT INTO products (
-                    title, price, category, description, photo, is_hit, is_new, stock, active, created_at, updated_at
-                )
-                VALUES (:title, :price, :category, :description, :photo, :is_hit, :is_new, :stock, 1, :created_at, :updated_at)
+                INSERT INTO products (title, price, category, description, photo, is_hit, is_new)
+                VALUES (:title, :price, :category, :description, :photo, :is_hit, :is_new)
                 """,
-                [{**item, "created_at": now, "updated_at": now} for item in DEMO_PRODUCTS],
+                DEMO_PRODUCTS,
             )
-
-        defaults = {
-            "min_order_amount": "0",
-            "free_delivery_from": "50000",
-            "per_user_limit": "5",
-            "hide_out_of_stock_after_days": "30",
-            "delivery_fee": "0",
-            "banner_text": "Добро пожаловать в ShopBron — Telegram-магазин для портфолио с заказами и бронью.",
-            "portfolio_description": "Telegram-магазин с каталогом, корзиной, заказами, бронью, остатками и админ-панелью внутри бота.",
-        }
-        for k, v in defaults.items():
-            conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (k, v))
-
-        conn.execute(
-            "INSERT OR IGNORE INTO promo_codes(code, discount_percent, active, created_at) VALUES (?, ?, 1, ?)",
-            ("WELCOME10", 10, now),
-        )
-
-        for uid in ADMIN_IDS:
-            conn.execute(
-                "INSERT OR REPLACE INTO roles(user_id, role, created_at) VALUES (?, 'admin', ?)",
-                (uid, now),
-            )
-        for uid in MANAGER_IDS:
-            if uid not in ADMIN_IDS:
-                conn.execute(
-                    "INSERT OR IGNORE INTO roles(user_id, role, created_at) VALUES (?, 'manager', ?)",
-                    (uid, now),
-                )
 
         conn.commit()
 
@@ -473,41 +225,11 @@ def init_db() -> None:
 # =========================
 # HELPERS
 # =========================
-def configure_logging() -> None:
-    Path(LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-        handlers=[
-            logging.FileHandler(LOG_PATH, encoding="utf-8"),
-            logging.StreamHandler(),
-        ],
-    )
-
-
-def now_dt() -> datetime:
-    return datetime.now()
-
-
-def now_str() -> str:
-    return now_dt().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def human_dt(value: str) -> str:
-    if not value:
-        return "-"
-    try:
-        dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-        return dt.strftime("%d.%m.%Y %H:%M")
-    except ValueError:
-        return value
-
-
 def money(value: int) -> str:
     return f"{value:,}".replace(",", " ") + f" {CURRENCY}"
 
 
-def short_text(text: str, limit: int = 22) -> str:
+def short_text(text: str, limit: int = 18) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
@@ -515,207 +237,24 @@ def escape_text(value: object) -> str:
     return escape(str(value))
 
 
-def is_admin(user_id: int) -> bool:
-    if user_id in ADMIN_IDS:
-        return True
-    with closing(db()) as conn:
-        row = conn.execute("SELECT role FROM roles WHERE user_id = ?", (user_id,)).fetchone()
-    return bool(row and row["role"] == "admin")
-
-
-def is_manager(user_id: int) -> bool:
-    if is_admin(user_id) or user_id in MANAGER_IDS:
-        return True
-    with closing(db()) as conn:
-        row = conn.execute("SELECT role FROM roles WHERE user_id = ?", (user_id,)).fetchone()
-    return bool(row and row["role"] in {"admin", "manager"})
-
-
-def get_setting(key: str, default: str = "") -> str:
-    with closing(db()) as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-    return str(row["value"]) if row else default
-
-
-def get_setting_int(key: str, default: int = 0) -> int:
-    try:
-        return int(get_setting(key, str(default)))
-    except Exception:
-        return default
-
-
-def set_setting(key: str, value: object) -> None:
-    with closing(db()) as conn:
-        conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)", (key, str(value)))
-        conn.commit()
-
-
-def assign_role(user_id: int, role: str) -> None:
-    if role not in {"admin", "manager"}:
-        raise ValueError("Недопустимая роль")
-    with closing(db()) as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO roles(user_id, role, created_at) VALUES (?, ?, ?)",
-            (int(user_id), role, now_str()),
-        )
-        conn.commit()
-    if role == "admin":
-        ADMIN_IDS.add(int(user_id))
-    else:
-        MANAGER_IDS.add(int(user_id))
-
-
-def remove_role(user_id: int) -> None:
-    with closing(db()) as conn:
-        conn.execute("DELETE FROM roles WHERE user_id = ?", (int(user_id),))
-        conn.commit()
-    ADMIN_IDS.discard(int(user_id))
-    MANAGER_IDS.discard(int(user_id))
-    ADMIN_IDS.add(MAIN_ADMIN_ID)
-    MANAGER_IDS.add(MAIN_ADMIN_ID)
-
-
-def get_roles_rows():
-    with closing(db()) as conn:
-        return conn.execute(
-            "SELECT user_id, role, created_at FROM roles ORDER BY CASE role WHEN 'admin' THEN 0 ELSE 1 END, user_id ASC"
-        ).fetchall()
-
-
-def roles_text() -> str:
-    rows = get_roles_rows()
-    if not rows:
-        return "Роли ещё не назначены."
-    lines = ["👥 <b>Роли доступа</b>", ""]
-    for row in rows:
-        lines.append(f"<code>{int(row['user_id'])}</code> — {escape_text(row['role'])} • {human_dt(row['created_at'])}")
-    lines.append("")
-    lines.append("Команды: /addadmin ID, /addmanager ID, /delrole ID")
-    return "\n".join(lines)
-
-
-def save_cart_meta(user_id: int, reminded: int = 0) -> None:
-    with closing(db()) as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO cart_meta(user_id, updated_at, reminded) VALUES (?, ?, ?)",
-            (user_id, now_str(), int(reminded)),
-        )
-        conn.commit()
-
-
-def clear_cart_meta(user_id: int) -> None:
-    with closing(db()) as conn:
-        conn.execute("DELETE FROM cart_meta WHERE user_id = ?", (user_id,))
-        conn.commit()
-
-
-def loyalty_discount_percent(user_id: int) -> int:
-    with closing(db()) as conn:
-        row = conn.execute(
-            "SELECT COUNT(*) AS c FROM orders WHERE user_id = ? AND type = 'order' AND status IN ('confirmed', 'issued')",
-            (user_id,),
-        ).fetchone()
-    count = int(row["c"]) if row else 0
-    return 7 if count >= 10 else 5 if count >= 5 else 3 if count >= 3 else 0
-
-
-def set_user_promo(user_id: int, code: str) -> tuple[bool, str]:
-    with closing(db()) as conn:
-        row = conn.execute(
-            "SELECT code, discount_percent, active FROM promo_codes WHERE UPPER(code) = UPPER(?)",
-            (code.strip(),),
-        ).fetchone()
-        if not row or int(row["active"]) != 1:
-            return False, "Промокод не найден или выключен."
-        conn.execute(
-            "INSERT OR REPLACE INTO user_active_promos(user_id, code, discount_percent, created_at) VALUES (?, ?, ?, ?)",
-            (user_id, str(row["code"]).upper(), int(row["discount_percent"]), now_str()),
-        )
-        conn.commit()
-    return True, f"Промокод {str(row['code']).upper()} применён: -{int(row['discount_percent'])}%"
-
-
-def get_user_promo(user_id: int) -> tuple[str, int]:
-    with closing(db()) as conn:
-        row = conn.execute("SELECT code, discount_percent FROM user_active_promos WHERE user_id = ?", (user_id,)).fetchone()
-    if not row:
-        return "", 0
-    return str(row["code"]), int(row["discount_percent"])
-
-
-def clear_user_promo(user_id: int) -> None:
-    with closing(db()) as conn:
-        conn.execute("DELETE FROM user_active_promos WHERE user_id = ?", (user_id,))
-        conn.commit()
-
-
-def manager_url() -> str:
-    if MANAGER_USERNAME:
-        return f"https://t.me/{MANAGER_USERNAME}"
-    return f"tg://user?id={MANAGER_ID}"
-
-
-def throttle_ok(user_id: int, key: str) -> bool:
-    now = time.time()
-    full_key = (user_id, key)
-    last = LAST_ACTION_TS.get(full_key, 0.0)
-    if now - last < SPAM_INTERVAL:
-        return False
-    LAST_ACTION_TS[full_key] = now
-    return True
-
-
-def parse_bool_flag(value: str) -> bool:
-    return value.strip().lower() in {"1", "да", "yes", "y", "true", "хит", "новинка", "on"}
-
-
-def normalize_phone(value: str) -> str:
-    return re.sub(r"\s+", " ", value.strip())
-
-
-def validate_phone(value: str) -> bool:
-    return bool(PHONE_RE.match(normalize_phone(value)))
-
-
-def status_label(status: str) -> str:
-    return ORDER_STATUSES.get(status, status)
-
-
-def order_type_label(order_type: str) -> str:
-    return "Заказ" if order_type == "order" else "Бронь"
-
-
-def available_stock(product_id: int) -> int:
-    with closing(db()) as conn:
-        row = conn.execute(
-            "SELECT stock FROM products WHERE id = ? AND active = 1",
-            (product_id,),
-        ).fetchone()
-    return int(row["stock"]) if row else 0
-
-
-def get_categories() -> list[str]:
+def get_categories() -> List[str]:
     with closing(db()) as conn:
         rows = conn.execute(
             "SELECT DISTINCT category FROM products WHERE active = 1 ORDER BY category"
         ).fetchall()
-    return [row["category"] for row in rows]
+    return [row[0] for row in rows]
 
 
 def get_products(
-    *,
     section: Optional[str] = None,
     category: Optional[str] = None,
     search: Optional[str] = None,
-    only_available: bool = False,
-    price_min: Optional[int] = None,
-    price_max: Optional[int] = None,
-    sort_by: str = "newest",
-    limit: Optional[int] = None,
 ):
     with closing(db()) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
         query = "SELECT * FROM products WHERE active = 1"
-        params: list[object] = []
+        params = []
 
         if section == "hits":
             query += " AND is_hit = 1"
@@ -725,160 +264,66 @@ def get_products(
             query += " AND category = ?"
             params.append(category)
         if search:
+            query += " AND (LOWER(title) LIKE ? OR LOWER(description) LIKE ?)"
             like = f"%{search.lower()}%"
-            query += " AND (LOWER(title) LIKE ? OR LOWER(description) LIKE ? OR LOWER(category) LIKE ?)"
-            params.extend([like, like, like])
-        if only_available:
-            query += " AND stock > 0"
-        if price_min is not None:
-            query += " AND price >= ?"
-            params.append(int(price_min))
-        if price_max is not None:
-            query += " AND price <= ?"
-            params.append(int(price_max))
+            params.extend([like, like])
 
-        order_map = {
-            "cheap": "price ASC, id DESC",
-            "expensive": "price DESC, id DESC",
-            "hits": "is_hit DESC, id DESC",
-            "name": "title COLLATE NOCASE ASC, id DESC",
-            "newest": "id DESC",
-        }
-        query += f" ORDER BY {order_map.get(sort_by, 'id DESC')}"
-        if limit is not None:
-            query += " LIMIT ?"
-            params.append(int(limit))
-        return conn.execute(query, params).fetchall()
+        query += " ORDER BY id ASC"
+        return cur.execute(query, params).fetchall()
 
 
 def get_product(product_id: int):
     with closing(db()) as conn:
-        return conn.execute(
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
             "SELECT * FROM products WHERE id = ? AND active = 1",
             (product_id,),
         ).fetchone()
+    return row
 
 
-def admin_get_product(product_id: int):
+def cart_add(user_id: int, product_id: int, qty: int = 1) -> None:
     with closing(db()) as conn:
-        return conn.execute(
-            "SELECT * FROM products WHERE id = ?",
-            (product_id,),
-        ).fetchone()
-
-
-def upsert_customer(user_id: int, full_name: str, username: str, phone: str = "") -> None:
-    with closing(db()) as conn:
-        conn.execute(
-            """
-            INSERT INTO customers (user_id, full_name, username, phone, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                full_name=excluded.full_name,
-                username=excluded.username,
-                phone=CASE WHEN excluded.phone <> '' THEN excluded.phone ELSE customers.phone END,
-                updated_at=excluded.updated_at
-            """,
-            (user_id, full_name, username, phone, now_str()),
-        )
-        conn.commit()
-
-
-def get_customer_phone(user_id: int) -> str:
-    with closing(db()) as conn:
-        row = conn.execute("SELECT phone FROM customers WHERE user_id = ?", (user_id,)).fetchone()
-    return row["phone"] if row and row["phone"] else ""
-
-
-def is_favorite(user_id: int, product_id: int) -> bool:
-    with closing(db()) as conn:
-        row = conn.execute(
-            "SELECT 1 FROM favorites WHERE user_id = ? AND product_id = ?",
-            (user_id, product_id),
-        ).fetchone()
-    return row is not None
-
-
-def toggle_favorite(user_id: int, product_id: int) -> bool:
-    with closing(db()) as conn:
-        row = conn.execute(
-            "SELECT 1 FROM favorites WHERE user_id = ? AND product_id = ?",
-            (user_id, product_id),
-        ).fetchone()
-        if row:
-            conn.execute(
-                "DELETE FROM favorites WHERE user_id = ? AND product_id = ?",
-                (user_id, product_id),
-            )
-            conn.commit()
-            return False
-
-        conn.execute(
-            "INSERT INTO favorites (user_id, product_id, created_at) VALUES (?, ?, ?)",
-            (user_id, product_id, now_str()),
-        )
-        conn.commit()
-        return True
-
-
-def favorite_items(user_id: int):
-    with closing(db()) as conn:
-        return conn.execute(
-            """
-            SELECT p.*
-            FROM favorites f
-            JOIN products p ON p.id = f.product_id
-            WHERE f.user_id = ? AND p.active = 1
-            ORDER BY f.created_at DESC
-            """,
-            (user_id,),
-        ).fetchall()
-
-
-def cart_add(user_id: int, product_id: int, qty: int = 1) -> tuple[bool, str]:
-    product = get_product(product_id)
-    if not product:
-        return False, "Товар не найден."
-
-    with closing(db()) as conn:
-        row = conn.execute(
+        cur = conn.cursor()
+        row = cur.execute(
             "SELECT quantity FROM carts WHERE user_id = ? AND product_id = ?",
             (user_id, product_id),
         ).fetchone()
-        current_qty = int(row["quantity"]) if row else 0
-        new_qty = current_qty + qty
-        limit_per_user = max(1, get_setting_int("per_user_limit", 5))
-        if new_qty > limit_per_user:
-            return False, f"Лимит на товар в одни руки: {limit_per_user} шт."
-
-        if new_qty <= 0:
-            conn.execute(
-                "DELETE FROM carts WHERE user_id = ? AND product_id = ?",
-                (user_id, product_id),
-            )
-            conn.commit()
-            return True, "Товар удалён из корзины."
-
-        if new_qty > int(product["stock"]):
-            return False, f"Недостаточно остатка. В наличии: {int(product['stock'])} шт."
-
         if row:
-            conn.execute(
-                "UPDATE carts SET quantity = ? WHERE user_id = ? AND product_id = ?",
-                (new_qty, user_id, product_id),
+            cur.execute(
+                "UPDATE carts SET quantity = quantity + ? WHERE user_id = ? AND product_id = ?",
+                (qty, user_id, product_id),
             )
         else:
-            conn.execute(
+            cur.execute(
                 "INSERT INTO carts (user_id, product_id, quantity) VALUES (?, ?, ?)",
                 (user_id, product_id, qty),
             )
         conn.commit()
-    save_cart_meta(user_id, reminded=0)
-    return True, "Корзина обновлена."
 
 
-def cart_change(user_id: int, product_id: int, delta: int) -> tuple[bool, str]:
-    return cart_add(user_id, product_id, delta)
+def cart_change(user_id: int, product_id: int, delta: int) -> None:
+    with closing(db()) as conn:
+        cur = conn.cursor()
+        row = cur.execute(
+            "SELECT quantity FROM carts WHERE user_id = ? AND product_id = ?",
+            (user_id, product_id),
+        ).fetchone()
+        if not row:
+            return
+
+        new_qty = row[0] + delta
+        if new_qty <= 0:
+            cur.execute(
+                "DELETE FROM carts WHERE user_id = ? AND product_id = ?",
+                (user_id, product_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE carts SET quantity = ? WHERE user_id = ? AND product_id = ?",
+                (new_qty, user_id, product_id),
+            )
+        conn.commit()
 
 
 def cart_remove(user_id: int, product_id: int) -> None:
@@ -888,29 +333,29 @@ def cart_remove(user_id: int, product_id: int) -> None:
             (user_id, product_id),
         )
         conn.commit()
-    save_cart_meta(user_id, reminded=0)
 
 
 def cart_clear(user_id: int) -> None:
     with closing(db()) as conn:
         conn.execute("DELETE FROM carts WHERE user_id = ?", (user_id,))
         conn.commit()
-    clear_cart_meta(user_id)
 
 
 def cart_items(user_id: int):
     with closing(db()) as conn:
-        return conn.execute(
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
             """
             SELECT p.id, p.title, p.price, p.category, p.description, p.photo,
-                   p.is_hit, p.is_new, p.stock, c.quantity
+                   p.is_hit, p.is_new, c.quantity
             FROM carts c
             JOIN products p ON p.id = c.product_id
             WHERE c.user_id = ? AND p.active = 1
-            ORDER BY p.id DESC
+            ORDER BY p.id ASC
             """,
             (user_id,),
         ).fetchall()
+    return rows
 
 
 def cart_total(user_id: int) -> int:
@@ -921,428 +366,119 @@ def cart_count(user_id: int) -> int:
     return sum(int(item["quantity"]) for item in cart_items(user_id))
 
 
-def validate_cart_stock(user_id: int) -> tuple[bool, str]:
+def create_order(user_id: int, name: str, phone: str, address: str, comment: str):
     items = cart_items(user_id)
-    if not items:
-        return False, "Корзина пуста."
-    for item in items:
-        if int(item["stock"]) < int(item["quantity"]):
-            return (
-                False,
-                f"Товар «{item['title']}» недоступен в нужном количестве. Остаток: {int(item['stock'])} шт.",
-            )
-    return True, ""
+    total = sum(int(item["price"]) * int(item["quantity"]) for item in items)
+    created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-
-def change_stock(product_id: int, delta: int) -> None:
     with closing(db()) as conn:
-        conn.execute(
-            "UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?",
-            (delta, now_str(), product_id),
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO orders (user_id, customer_name, phone, address, comment, total, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, name, phone, address, comment, total, created_at),
+        )
+        order_id = cur.lastrowid
+        cur.executemany(
+            """
+            INSERT INTO order_items (order_id, product_id, title, price, quantity)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    order_id,
+                    int(item["id"]),
+                    str(item["title"]),
+                    int(item["price"]),
+                    int(item["quantity"]),
+                )
+                for item in items
+            ],
         )
         conn.commit()
-
-
-def create_sale(
-    *,
-    sale_type: str,
-    user_id: int,
-    customer_name: str,
-    phone: str,
-    delivery_method: str,
-    payment_method: str,
-    address: str,
-    comment: str,
-) -> dict:
-    items = cart_items(user_id)
-    if not items:
-        raise ValueError("Корзина пуста.")
-
-    ok, error = validate_cart_stock(user_id)
-    if not ok:
-        raise ValueError(error)
-
-    subtotal = sum(int(item["price"]) * int(item["quantity"]) for item in items)
-    promo_code, promo_percent = get_user_promo(user_id)
-    loyalty_percent = loyalty_discount_percent(user_id)
-    discount_percent = promo_percent + loyalty_percent
-    total = max(0, subtotal - (subtotal * discount_percent // 100))
-    if sale_type == "order":
-        min_order_amount = get_setting_int("min_order_amount", 0)
-        if total < min_order_amount:
-            raise ValueError(f"Минимальная сумма заказа: {money(min_order_amount)}")
-    created = now_str()
-    expires_at = ""
-    if sale_type == "reservation":
-        expires_at = (now_dt() + timedelta(hours=RESERVATION_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
-
-    with closing(db()) as conn:
-        conn.execute("BEGIN")
-        try:
-            for item in items:
-                current_stock_row = conn.execute(
-                    "SELECT stock FROM products WHERE id = ?",
-                    (int(item["id"]),),
-                ).fetchone()
-                current_stock = int(current_stock_row["stock"]) if current_stock_row else 0
-                if current_stock < int(item["quantity"]):
-                    raise ValueError(
-                        f"Товар «{item['title']}» недоступен в нужном количестве. Остаток: {current_stock} шт."
-                    )
-
-            cur = conn.execute(
-                """
-                INSERT INTO orders (
-                    user_id, type, status, customer_name, phone, delivery_method,
-                    payment_method, address, comment, total, created_at, updated_at, expires_at
-                )
-                VALUES (?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    user_id,
-                    sale_type,
-                    customer_name,
-                    phone,
-                    delivery_method,
-                    payment_method,
-                    address,
-                    comment,
-                    total,
-                    created,
-                    created,
-                    expires_at,
-                ),
-            )
-            sale_id = cur.lastrowid
-
-            for item in items:
-                conn.execute(
-                    """
-                    INSERT INTO order_items (order_id, product_id, title, price, quantity)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        sale_id,
-                        int(item["id"]),
-                        str(item["title"]),
-                        int(item["price"]),
-                        int(item["quantity"]),
-                    ),
-                )
-                conn.execute(
-                    "UPDATE products SET stock = stock - ?, updated_at = ? WHERE id = ?",
-                    (int(item["quantity"]), created, int(item["id"])),
-                )
-
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
 
     cart_clear(user_id)
-    if promo_code:
-        clear_user_promo(user_id)
-
     return {
-        "id": sale_id,
-        "type": sale_type,
-        "status": "new",
-        "customer_name": customer_name,
-        "phone": phone,
-        "delivery_method": delivery_method,
-        "payment_method": payment_method,
-        "address": address,
-        "comment": comment,
-        "total": total,
-        "created_at": created,
-        "updated_at": created,
-        "expires_at": expires_at,
+        "order_id": order_id,
         "items": items,
-        "subtotal": subtotal,
-        "promo_code": promo_code,
-        "promo_percent": promo_percent,
-        "loyalty_percent": loyalty_percent,
-        "discount_percent": discount_percent,
+        "total": total,
+        "created_at": created_at,
     }
 
 
-def get_order(order_id: int):
+def get_stats():
     with closing(db()) as conn:
-        return conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+        cur = conn.cursor()
+        products = cur.execute("SELECT COUNT(*) FROM products WHERE active = 1").fetchone()[0]
+        orders = cur.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+        revenue = cur.execute("SELECT COALESCE(SUM(total), 0) FROM orders").fetchone()[0]
+    return {"products": products, "orders": orders, "revenue": revenue}
 
 
-def get_order_items(order_id: int):
+def get_recent_orders(limit: int = 5):
     with closing(db()) as conn:
-        return conn.execute(
-            "SELECT * FROM order_items WHERE order_id = ? ORDER BY id ASC",
-            (order_id,),
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM orders ORDER BY id DESC LIMIT ?",
+            (limit,),
         ).fetchall()
+    return rows
 
 
-def get_user_orders(user_id: int, limit: int = 20):
-    with closing(db()) as conn:
-        return conn.execute(
-            "SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT ?",
-            (user_id, limit),
-        ).fetchall()
+def manager_url() -> str:
+    return f"https://t.me/{MANAGER_USERNAME}" if MANAGER_USERNAME else "https://t.me"
 
 
-def get_recent_sales(limit: int = 10, sale_type: Optional[str] = None):
-    with closing(db()) as conn:
-        query = "SELECT * FROM orders"
-        params: list[object] = []
-        if sale_type:
-            query += " WHERE type = ?"
-            params.append(sale_type)
-        query += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
-        return conn.execute(query, params).fetchall()
+def whatsapp_url() -> str:
+    digits = "".join(ch for ch in SUPPORT_WHATSAPP if ch.isdigit())
+    return f"https://wa.me/{digits}" if digits else "https://wa.me"
 
 
-def admin_search_sales(query_text: str, limit: int = 20):
-    like = f"%{query_text.lower()}%"
-    with closing(db()) as conn:
-        return conn.execute(
-            """
-            SELECT *
-            FROM orders
-            WHERE LOWER(customer_name) LIKE ?
-               OR LOWER(phone) LIKE ?
-               OR CAST(id AS TEXT) = ?
-               OR CAST(user_id AS TEXT) = ?
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (like, like, query_text.strip(), query_text.strip(), limit),
-        ).fetchall()
+def support_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📱 WhatsApp", url=whatsapp_url()),
+                InlineKeyboardButton(text="💬 Telegram", url=manager_url()),
+            ],
+            [InlineKeyboardButton(text="📧 Показать email", callback_data="support:email")],
+        ]
+    )
 
 
-def get_week_hit_products(limit: int = 10):
-    border = (now_dt() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-    with closing(db()) as conn:
-        return conn.execute(
-            """
-            SELECT p.*, COALESCE(SUM(oi.quantity), 0) AS sold_qty
-            FROM products p
-            JOIN order_items oi ON oi.product_id = p.id
-            JOIN orders o ON o.id = oi.order_id
-            WHERE p.active = 1
-              AND o.type = 'order'
-              AND o.status IN ('new', 'confirmed', 'issued')
-              AND o.created_at >= ?
-            GROUP BY p.id
-            ORDER BY sold_qty DESC, p.id DESC
-            LIMIT ?
-            """,
-            (border, int(limit)),
-        ).fetchall()
-
-
-def get_week_new_products(limit: int = 10):
-    border = (now_dt() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-    with closing(db()) as conn:
-        return conn.execute(
-            """
-            SELECT *
-            FROM products
-            WHERE active = 1 AND (created_at >= ? OR is_new = 1)
-            ORDER BY created_at DESC, id DESC
-            LIMIT ?
-            """,
-            (border, int(limit)),
-        ).fetchall()
-
-
-def get_cross_sell_products(product_id: int, limit: int = 3):
-    with closing(db()) as conn:
-        return conn.execute(
-            """
-            SELECT p.*, COUNT(*) AS cnt
-            FROM order_items base
-            JOIN order_items oi ON oi.order_id = base.order_id AND oi.product_id <> base.product_id
-            JOIN orders o ON o.id = oi.order_id AND o.type = 'order'
-            JOIN products p ON p.id = oi.product_id
-            WHERE base.product_id = ? AND p.active = 1
-            GROUP BY p.id
-            ORDER BY cnt DESC, p.id DESC
-            LIMIT ?
-            """,
-            (int(product_id), int(limit)),
-        ).fetchall()
-
-
-def restore_stock_for_sale(conn: sqlite3.Connection, order_id: int) -> None:
-    items = conn.execute(
-        "SELECT product_id, quantity FROM order_items WHERE order_id = ?",
-        (order_id,),
-    ).fetchall()
-    for item in items:
-        conn.execute(
-            "UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?",
-            (int(item["quantity"]), now_str(), int(item["product_id"])),
-        )
-
-
-def update_sale_status(order_id: int, new_status: str) -> tuple[bool, str]:
-    allowed_transitions = {
-        "new": {"confirmed", "cancelled", "issued"},
-        "confirmed": {"issued", "cancelled"},
-        "issued": set(),
-        "cancelled": set(),
-    }
-
-    with closing(db()) as conn:
-        row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
-        if not row:
-            return False, "Запись не найдена."
-
-        old_status = str(row["status"])
-        if old_status == new_status:
-            return True, "Статус уже установлен."
-
-        if new_status not in ORDER_STATUSES:
-            return False, "Неизвестный статус."
-
-        if new_status not in allowed_transitions.get(old_status, set()):
-            return False, f"Нельзя изменить статус с «{status_label(old_status)}» на «{status_label(new_status)}»."
-
-        conn.execute("BEGIN")
-        try:
-            if new_status == "cancelled" and old_status in {"new", "confirmed"}:
-                restore_stock_for_sale(conn, order_id)
-            conn.execute(
-                "UPDATE orders SET status = ?, updated_at = ? WHERE id = ?",
-                (new_status, now_str(), order_id),
-            )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-
-    return True, "Статус обновлён."
-
-
-def get_stats() -> dict[str, int]:
-    with closing(db()) as conn:
-        products = conn.execute("SELECT COUNT(*) AS c FROM products WHERE active = 1").fetchone()["c"]
-        orders = conn.execute(
-            "SELECT COUNT(*) AS c FROM orders WHERE type = 'order'"
-        ).fetchone()["c"]
-        reservations = conn.execute(
-            "SELECT COUNT(*) AS c FROM orders WHERE type = 'reservation'"
-        ).fetchone()["c"]
-        revenue = conn.execute(
-            "SELECT COALESCE(SUM(total), 0) AS s FROM orders WHERE type = 'order' AND status IN ('new', 'confirmed', 'issued')"
-        ).fetchone()["s"]
-        total_stock = conn.execute(
-            "SELECT COALESCE(SUM(stock), 0) AS s FROM products WHERE active = 1"
-        ).fetchone()["s"]
-    return {
-        "products": int(products),
-        "orders": int(orders),
-        "reservations": int(reservations),
-        "revenue": int(revenue or 0),
-        "stock": int(total_stock or 0),
-    }
-
-
-def daily_report_text(day: Optional[str] = None) -> str:
-    day = day or now_dt().strftime("%Y-%m-%d")
-    with closing(db()) as conn:
-        orders = conn.execute("SELECT COUNT(*) AS c FROM orders WHERE type='order' AND created_at LIKE ?", (f"{day}%",)).fetchone()['c']
-        reservations = conn.execute("SELECT COUNT(*) AS c FROM orders WHERE type='reservation' AND created_at LIKE ?", (f"{day}%",)).fetchone()['c']
-        revenue = conn.execute("SELECT COALESCE(SUM(total),0) AS s FROM orders WHERE type='order' AND created_at LIKE ? AND status IN ('new','confirmed','issued')", (f"{day}%",)).fetchone()['s']
-    return f"📊 <b>Отчёт за день {day}</b>\nЗаказов: <b>{int(orders)}</b>\nБроней: <b>{int(reservations)}</b>\nОборот: <b>{money(int(revenue or 0))}</b>"
-
-
-def add_product(data: dict[str, object]) -> int:
-    created = now_str()
-    with closing(db()) as conn:
-        cur = conn.execute(
-            """
-            INSERT INTO products (
-                title, price, category, description, photo,
-                is_hit, is_new, stock, active, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-            """,
-            (
-                str(data["title"]),
-                int(data["price"]),
-                str(data["category"]),
-                str(data["description"]),
-                str(data["photo"]),
-                int(data["is_hit"]),
-                int(data["is_new"]),
-                int(data["stock"]),
-                created,
-                created,
-            ),
-        )
-        conn.commit()
-        return int(cur.lastrowid)
-
-
-def update_product_field(product_id: int, field: str, value: object) -> None:
-    allowed = {
-        "title",
-        "price",
-        "category",
-        "description",
-        "photo",
-        "stock",
-        "is_hit",
-        "is_new",
-        "active",
-    }
-    if field not in allowed:
-        raise ValueError("Недопустимое поле.")
-
-    with closing(db()) as conn:
-        conn.execute(
-            f"UPDATE products SET {field} = ?, updated_at = ? WHERE id = ?",
-            (value, now_str(), product_id),
-        )
-        conn.commit()
-
-
-def product_caption(product: sqlite3.Row, *, favorite: bool = False) -> str:
-    marks: list[str] = []
+def product_caption(product: sqlite3.Row) -> str:
+    marks = []
     if int(product["is_hit"]):
         marks.append("ХИТ")
     if int(product["is_new"]):
         marks.append("НОВИНКА")
-    if int(product["stock"]) <= 0:
-        marks.append("НЕТ В НАЛИЧИИ")
     badge = f" [{' • '.join(marks)}]" if marks else ""
-    fav = "\n❤️ В избранном" if favorite else ""
 
-    return (
-        f"<b>{escape_text(product['title'])}</b>{badge}\n\n"
-        f"💵 Цена: <b>{money(int(product['price']))}</b>\n"
-        f"📦 Остаток: <b>{int(product['stock'])} шт.</b>\n"
-        f"📂 Категория: {escape_text(product['category'])}{fav}\n\n"
-        f"{escape_text(product['description'])}"
-    )
+    return f"""<b>{escape_text(product['title'])}</b>{badge}
+
+💵 Цена: <b>{money(int(product['price']))}</b>
+📂 Категория: {escape_text(product['category'])}
+
+{escape_text(product['description'])}"""
 
 
 def products_text(title: str, items) -> str:
     if not items:
-        return f"<b>{escape_text(title)}</b>\n\nПока в этом разделе ничего нет."
+        return f"""<b>{escape_text(title)}</b>
+
+Пока в этом разделе ничего нет."""
 
     lines = [f"<b>{escape_text(title)}</b>", ""]
     for item in items:
-        labels: list[str] = []
+        marks = []
         if int(item["is_hit"]):
-            labels.append("Хит")
+            marks.append("Хит")
         if int(item["is_new"]):
-            labels.append("Новинка")
-        if int(item["stock"]) <= 0:
-            labels.append("Нет в наличии")
-        suffix = f" • {', '.join(labels)}" if labels else ""
-        lines.append(
-            f"• #{int(item['id'])} {escape_text(item['title'])} — {money(int(item['price']))} • Остаток: {int(item['stock'])} шт.{suffix}"
-        )
+            marks.append("Новинка")
+        suffix = f" • {', '.join(marks)}" if marks else ""
+        lines.append(f"• {escape_text(item['title'])} — {money(int(item['price']))}{suffix}")
 
     lines.append("")
     lines.append("Нажмите на товар ниже, чтобы открыть карточку.")
@@ -1352,35 +488,25 @@ def products_text(title: str, items) -> str:
 def cart_text(user_id: int) -> str:
     items = cart_items(user_id)
     if not items:
-        return "🧺 <b>Корзина пуста</b>\n\nДобавьте товары из каталога."
+        return """🧺 <b>Корзина пуста</b>
+
+Добавьте товары из каталога, а потом оформите заявку."""
 
     lines = ["🧺 <b>Ваша корзина</b>", ""]
     for idx, item in enumerate(items, start=1):
         lines.append(
-            f"{idx}. {escape_text(item['title'])} — {money(int(item['price']))} × {int(item['quantity'])} "
-            f"(остаток: {int(item['stock'])})"
+            f"{idx}. {escape_text(item['title'])} — {money(int(item['price']))} × {int(item['quantity'])}"
         )
 
-    promo_code, promo_percent = get_user_promo(user_id)
-    loyalty_percent = loyalty_discount_percent(user_id)
     lines.append("")
-    lines.append(f"Сумма товаров: <b>{money(cart_total(user_id))}</b>")
-    if promo_code:
-        lines.append(f"Промокод: <b>{escape_text(promo_code)}</b> (-{promo_percent}%)")
-    if loyalty_percent:
-        lines.append(f"Персональная скидка: <b>-{loyalty_percent}%</b>")
-    free_from = get_setting_int("free_delivery_from", 50000)
-    if cart_total(user_id) >= free_from:
-        lines.append("Доставка: <b>бесплатно</b>")
-    else:
-        lines.append(f"Бесплатная доставка от: <b>{money(free_from)}</b>")
+    lines.append(f"Итого: <b>{money(cart_total(user_id))}</b>")
     lines.append(f"Позиций: <b>{cart_count(user_id)}</b>")
     lines.append("")
-    lines.append("Можно оформить заказ или бронь на 24 часа.")
+    lines.append("Нажмите <b>✅ Оформить</b>, чтобы отправить заказ админу.")
     return "\n".join(lines)
 
 
-def order_items_text(items: Iterable[sqlite3.Row]) -> str:
+def order_items_text(items) -> str:
     lines = []
     for idx, item in enumerate(items, start=1):
         qty = int(item["quantity"])
@@ -1391,73 +517,28 @@ def order_items_text(items: Iterable[sqlite3.Row]) -> str:
     return "\n".join(lines)
 
 
-def order_text(order: sqlite3.Row, items: Optional[list[sqlite3.Row]] = None) -> str:
-    if items is None:
-        items = list(get_order_items(int(order["id"])))
-
-    extra = ""
-    if order["type"] == "reservation" and order["expires_at"]:
-        extra = f"\n⏳ До: <b>{human_dt(order['expires_at'])}</b>"
-
-    delivery = DELIVERY_METHODS.get(order["delivery_method"], order["delivery_method"] or "-")
-    payment = PAYMENT_METHODS.get(order["payment_method"], order["payment_method"] or "-")
-
-    return (
-        f"📦 <b>{order_type_label(order['type'])} #{int(order['id'])}</b>\n\n"
-        f"Статус: <b>{status_label(order['status'])}</b>\n"
-        f"Создано: {human_dt(order['created_at'])}\n"
-        f"Обновлено: {human_dt(order['updated_at'])}{extra}\n"
-        f"Имя: {escape_text(order['customer_name'])}\n"
-        f"Телефон: {escape_text(order['phone'])}\n"
-        f"Доставка: {escape_text(delivery)}\n"
-        f"Оплата: {escape_text(payment)}\n"
-        f"Адрес: {escape_text(order['address'] or '-')}\n"
-        f"Комментарий: {escape_text(order['comment'] or '-')}\n\n"
-        f"<b>Товары:</b>\n{order_items_text(items)}\n\n"
-        f"💰 Итого: <b>{money(int(order['total']))}</b>"
-    )
-
-
-def product_admin_text(product: sqlite3.Row) -> str:
-    return (
-        f"🛠 <b>Товар #{int(product['id'])}</b>\n\n"
-        f"Название: {escape_text(product['title'])}\n"
-        f"Цена: {money(int(product['price']))}\n"
-        f"Категория: {escape_text(product['category'])}\n"
-        f"Остаток: {int(product['stock'])} шт.\n"
-        f"Хит: {'Да' if int(product['is_hit']) else 'Нет'}\n"
-        f"Новинка: {'Да' if int(product['is_new']) else 'Нет'}\n"
-        f"Активен: {'Да' if int(product['active']) else 'Нет'}\n"
-        f"Фото: {'Есть' if str(product['photo']).strip() else 'Нет'}\n\n"
-        f"{escape_text(product['description'])}"
-    )
-
-
-async def safe_send_user_message(bot: Bot, user_id: int, text: str, **kwargs) -> None:
-    try:
-        await bot.send_message(user_id, text, **kwargs)
-    except Exception as exc:
-        logging.warning("Cannot notify user %s: %s", user_id, exc)
+def user_tag(user) -> str:
+    full_name = escape_text(user.full_name)
+    if user.username:
+        return f"{full_name} (@{escape_text(user.username)}) | ID: <code>{user.id}</code>"
+    return f"{full_name} | ID: <code>{user.id}</code>"
 
 
 # =========================
-# KEYBOARDS
+# REPLY KEYBOARDS
 # =========================
-def main_menu(user_id: int) -> ReplyKeyboardMarkup:
-    keyboard = [
-        [KeyboardButton(text="🛍 Каталог"), KeyboardButton(text="🔥 Хиты")],
-        [KeyboardButton(text="🆕 Новинки"), KeyboardButton(text="🔎 Поиск")],
-        [KeyboardButton(text="❤️ Избранное"), KeyboardButton(text="🧺 Корзина")],
-        [KeyboardButton(text="📦 Мои заказы и брони"), KeyboardButton(text="💬 Менеджер")],
-        [KeyboardButton(text="🎟 Промокод"), KeyboardButton(text="🎉 Акции")],
-        [KeyboardButton(text="🚚 Доставка"), KeyboardButton(text="ℹ️ О магазине")],
-    ]
-    if is_admin(user_id):
-        keyboard.append([KeyboardButton(text="⚙️ Админ-панель")])
+def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=keyboard,
+        keyboard=[
+            [KeyboardButton(text="🛍 Коллекция"), KeyboardButton(text="🔥 Хиты")],
+            [KeyboardButton(text="🆕 Новинки"), KeyboardButton(text="🔎 Поиск")],
+            [KeyboardButton(text="🧺 Корзина"), KeyboardButton(text="🛟 Техподдержка")],
+            [KeyboardButton(text="🚚 Доставка"), KeyboardButton(text="⭐ Отзывы")],
+            [KeyboardButton(text="ℹ️ О бутике")],
+            [KeyboardButton(text="⚙️ Управление")],
+        ],
         resize_keyboard=True,
-        input_field_placeholder="Выберите раздел…",
+        input_field_placeholder="Выберите раздел...",
     )
 
 
@@ -1465,6 +546,7 @@ def cancel_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="❌ Отмена")]],
         resize_keyboard=True,
+        input_field_placeholder="Можно отменить действие...",
     )
 
 
@@ -1475,133 +557,92 @@ def phone_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="❌ Отмена")],
         ],
         resize_keyboard=True,
+        input_field_placeholder="Введите номер или отправьте контакт...",
     )
 
 
+# =========================
+# INLINE KEYBOARDS
+# =========================
 def categories_kb() -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=f"📂 {cat}", callback_data=f"cat:{cat}")] for cat in get_categories()]
+    rows = []
+    for category in get_categories():
+        rows.append([InlineKeyboardButton(text=f"📂 {category}", callback_data=f"cat:{category}")])
+
     rows.append(
         [
             InlineKeyboardButton(text="🔥 Хиты", callback_data="section:hits"),
             InlineKeyboardButton(text="🆕 Новинки", callback_data="section:new"),
         ]
     )
-    rows.append(
-        [
-            InlineKeyboardButton(text="🔥 Хиты недели", callback_data="section:week_hits"),
-            InlineKeyboardButton(text="🆕 За 7 дней", callback_data="section:week_new"),
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(text="💸 До 20 000", callback_data="price:0:20000"),
-            InlineKeyboardButton(text="💸 20–50 тыс", callback_data="price:20000:50000"),
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(text="↕️ Дешевле", callback_data="sort:cheap"),
-            InlineKeyboardButton(text="↕️ Дороже", callback_data="sort:expensive"),
-        ]
-    )
-    rows.append([InlineKeyboardButton(text="📦 Только в наличии", callback_data="filter:available")])
     rows.append([InlineKeyboardButton(text="🧺 Корзина", callback_data="cart:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def products_kb(items) -> InlineKeyboardMarkup:
-    rows = [
-        [
-            InlineKeyboardButton(
-                text=f"{short_text(str(item['title']))} • {money(int(item['price']))}",
-                callback_data=f"product:{int(item['id'])}",
-            )
-        ]
-        for item in items
-    ]
+    rows = []
+    for item in items:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{item['title']} • {money(int(item['price']))}",
+                    callback_data=f"product:{int(item['id'])}",
+                )
+            ]
+        )
+
     rows.append(
         [
             InlineKeyboardButton(text="🛍 Каталог", callback_data="catalog:open"),
             InlineKeyboardButton(text="🧺 Корзина", callback_data="cart:open"),
         ]
     )
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="catalog:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def product_kb(product_id: int, user_id: int) -> InlineKeyboardMarkup:
-    fav_label = "💔 Убрать из избранного" if is_favorite(user_id, product_id) else "❤️ В избранное"
-    product = get_product(product_id)
-    stock = int(product["stock"]) if product else 0
-
-    rows = []
-    if stock > 0:
-        rows.append(
+def product_kb(product_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [
                 InlineKeyboardButton(text="🛒 В корзину", callback_data=f"add:{product_id}"),
                 InlineKeyboardButton(text="🧺 Корзина", callback_data="cart:open"),
-            ]
-        )
-    else:
-        rows.append([InlineKeyboardButton(text="🚫 Нет в наличии", callback_data="noop")])
-
-    rows.append([InlineKeyboardButton(text=fav_label, callback_data=f"fav:{product_id}")])
-    rows.append(
-        [
-            InlineKeyboardButton(text="🛍 Каталог", callback_data="catalog:open"),
-            InlineKeyboardButton(text="💬 Менеджер", url=manager_url()),
+            ],
+            [
+                InlineKeyboardButton(text="🛍 Каталог", callback_data="catalog:open"),
+                InlineKeyboardButton(text="🛟 Поддержка", callback_data="support:open"),
+            ],
         ]
     )
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="catalog:open")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def cart_kb(items) -> InlineKeyboardMarkup:
     rows = []
     for item in items:
-        pid = int(item["id"])
+        product_id = int(item["id"])
         rows.append(
             [
-                InlineKeyboardButton(text="➖", callback_data=f"cart:minus:{pid}"),
-                InlineKeyboardButton(text=f"{short_text(str(item['title']))} × {int(item['quantity'])}", callback_data="noop"),
-                InlineKeyboardButton(text="➕", callback_data=f"cart:plus:{pid}"),
+                InlineKeyboardButton(text="➖", callback_data=f"cart:minus:{product_id}"),
+                InlineKeyboardButton(
+                    text=f"{short_text(str(item['title']))} × {int(item['quantity'])}",
+                    callback_data="noop",
+                ),
+                InlineKeyboardButton(text="➕", callback_data=f"cart:plus:{product_id}"),
             ]
         )
-        rows.append([InlineKeyboardButton(text="🗑 Удалить", callback_data=f"cart:del:{pid}")])
+        rows.append([InlineKeyboardButton(text="🗑 Удалить", callback_data=f"cart:del:{product_id}")])
 
     rows.append(
         [
-            InlineKeyboardButton(text="✅ Оформить заказ", callback_data="checkout:order"),
-            InlineKeyboardButton(text="📌 Оформить бронь", callback_data="checkout:reservation"),
+            InlineKeyboardButton(text="✅ Оформить", callback_data="checkout:start"),
+            InlineKeyboardButton(text="🧹 Очистить", callback_data="cart:clear"),
         ]
     )
-    rows.append([InlineKeyboardButton(text="🧹 Очистить", callback_data="cart:clear")])
-    rows.append([InlineKeyboardButton(text="🛍 Каталог", callback_data="catalog:open")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="catalog:open")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def history_kb(items) -> InlineKeyboardMarkup:
-    rows = []
-    for item in items:
-        oid = int(item['id'])
-        rows.append([InlineKeyboardButton(text=f"{order_type_label(item['type'])} #{oid} • {status_label(item['status'])}", callback_data=f"sale:view:{oid}")])
-        rows.append([InlineKeyboardButton(text="🔁 Повторить", callback_data=f"sale:repeat:{oid}")])
-        if item['type'] == 'reservation' and item['status'] == 'new':
-            rows.append([InlineKeyboardButton(text="⏳ Продлить на 24ч", callback_data=f"sale:extend:{oid}")])
-    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="catalog:open")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def checkout_delivery_kb() -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=label, callback_data=f"delivery:{key}")] for key, label in DELIVERY_METHODS.items()]
-    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="catalog:open")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def checkout_payment_kb() -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=label, callback_data=f"payment:{key}")] for key, label in PAYMENT_METHODS.items()]
-    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="catalog:open")])
+    rows.append(
+        [
+            InlineKeyboardButton(text="🛍 Каталог", callback_data="catalog:open"),
+            InlineKeyboardButton(text="🛟 Поддержка", callback_data="support:open"),
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1610,84 +651,8 @@ def admin_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats"),
-                InlineKeyboardButton(text="📦 Заказы", callback_data="admin:list:order"),
-            ],
-            [
-                InlineKeyboardButton(text="📌 Брони", callback_data="admin:list:reservation"),
-                InlineKeyboardButton(text="🔎 Поиск по заказам", callback_data="admin:search"),
-            ],
-            [
-                InlineKeyboardButton(text="🛠 Товары", callback_data="admin:products"),
-                InlineKeyboardButton(text="➕ Добавить товар", callback_data="admin:add_product"),
-            ],
-            [
-                InlineKeyboardButton(text="📤 Экспорт CSV", callback_data="admin:export"),
-                InlineKeyboardButton(text="📥 Импорт CSV", callback_data="admin:import"),
-            ],
-            [
-                InlineKeyboardButton(text="💾 Бэкап БД", callback_data="admin:backup"),
-                InlineKeyboardButton(text="📊 Отчёт за сегодня", callback_data="admin:report"),
-            ],
-            [
-                InlineKeyboardButton(text="⏰ Истекают сегодня", callback_data="admin:expiring"),
-                InlineKeyboardButton(text="📣 Рассылка", callback_data="admin:broadcast"),
-            ],
-            [
-                InlineKeyboardButton(text="💸 Массово изменить цены", callback_data="admin:mass_price"),
-            ],
-        ]
-    )
-
-
-def admin_sale_actions_kb(order_id: int, status: str) -> InlineKeyboardMarkup:
-    rows = []
-    if status not in {"cancelled", "issued"}:
-        rows.append(
-            [
-                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"admin:status:{order_id}:confirmed"),
-                InlineKeyboardButton(text="🚫 Отменить", callback_data=f"admin:status:{order_id}:cancelled"),
+                InlineKeyboardButton(text="🧾 Последние заказы", callback_data="admin:orders"),
             ]
-        )
-        rows.append([InlineKeyboardButton(text="📦 Выдано/Закрыто", callback_data=f"admin:status:{order_id}:issued")])
-    rows.append([InlineKeyboardButton(text="⬅️ К списку", callback_data="admin:back")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def admin_products_kb(items) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text=f"#{int(item['id'])} {short_text(str(item['title']))}", callback_data=f"admin:product:{int(item['id'])}")]
-        for item in items
-    ]
-    rows.append([InlineKeyboardButton(text="➕ Добавить товар", callback_data="admin:add_product")])
-    rows.append([InlineKeyboardButton(text="⬅️ Админ-панель", callback_data="admin:back")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def admin_product_actions_kb(product_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✏️ Название", callback_data=f"admin:edit:{product_id}:title"),
-                InlineKeyboardButton(text="💵 Цена", callback_data=f"admin:edit:{product_id}:price"),
-            ],
-            [
-                InlineKeyboardButton(text="📂 Категория", callback_data=f"admin:edit:{product_id}:category"),
-                InlineKeyboardButton(text="📝 Описание", callback_data=f"admin:edit:{product_id}:description"),
-            ],
-            [
-                InlineKeyboardButton(text="🖼 Фото", callback_data=f"admin:edit:{product_id}:photo"),
-                InlineKeyboardButton(text="📦 Остаток", callback_data=f"admin:edit:{product_id}:stock"),
-            ],
-            [
-                InlineKeyboardButton(text="🔥 Хит", callback_data=f"admin:toggle:{product_id}:is_hit"),
-                InlineKeyboardButton(text="🆕 Новинка", callback_data=f"admin:toggle:{product_id}:is_new"),
-            ],
-            [
-                InlineKeyboardButton(text="👁 Активность", callback_data=f"admin:toggle:{product_id}:active"),
-            ],
-            [
-                InlineKeyboardButton(text="⬅️ К товарам", callback_data="admin:products"),
-            ],
         ]
     )
 
@@ -1695,305 +660,62 @@ def admin_product_actions_kb(product_id: int) -> InlineKeyboardMarkup:
 # =========================
 # SEND HELPERS
 # =========================
-async def send_product_message(target: Message, product: sqlite3.Row, user_id: int) -> None:
-    caption = product_caption(product, favorite=is_favorite(user_id, int(product["id"])))
+async def send_product_message(target: Message, product: sqlite3.Row) -> None:
+    caption = product_caption(product)
     photo = str(product["photo"]).strip()
 
-    if photo:
-        try:
-            await target.answer_photo(
-                photo=photo,
-                caption=caption,
-                reply_markup=product_kb(int(product["id"]), user_id),
-            )
-            return
-        except Exception as exc:
-            logging.warning("Cannot send product photo %s: %s", product["id"], exc)
-
-    await target.answer(
-        caption,
-        reply_markup=product_kb(int(product["id"]), user_id),
-    )
+    if photo.startswith("http://") or photo.startswith("https://"):
+        await target.answer_photo(
+            photo=photo,
+            caption=caption,
+            reply_markup=product_kb(int(product["id"])),
+        )
+    else:
+        await target.answer(
+            caption,
+            reply_markup=product_kb(int(product["id"])),
+        )
 
 
 # =========================
-# BACKGROUND JOBS
-# =========================
-async def expire_reservations_job(bot: Bot) -> None:
-    while True:
-        try:
-            expired = []
-            with closing(db()) as conn:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM orders
-                    WHERE type = 'reservation'
-                      AND status = 'new'
-                      AND expires_at <> ''
-                      AND expires_at <= ?
-                    ORDER BY id ASC
-                    """,
-                    (now_str(),),
-                ).fetchall()
-
-                if rows:
-                    conn.execute("BEGIN")
-                    try:
-                        for row in rows:
-                            restore_stock_for_sale(conn, int(row["id"]))
-                            conn.execute(
-                                "UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ?",
-                                (now_str(), int(row["id"])),
-                            )
-                            expired.append(dict(row))
-                        conn.commit()
-                    except Exception:
-                        conn.rollback()
-                        raise
-
-            for row in expired:
-                text = (
-                    f"⌛ <b>Бронь #{row['id']}</b> автоматически отменена, потому что истёк срок {RESERVATION_HOURS} часа(ов)."
-                )
-                await safe_send_user_message(bot, int(row["user_id"]), text)
-                for admin_id in ADMIN_IDS:
-                    if admin_id != int(row["user_id"]):
-                        await safe_send_user_message(bot, admin_id, f"⌛ Истекла бронь #{row['id']}. Остаток возвращён на склад.")
-        except Exception as exc:
-            logging.exception("Expire reservations job failed: %s", exc)
-
-        await asyncio.sleep(60)
-
-
-
-
-async def reservation_reminders_job(bot: Bot) -> None:
-    while True:
-        try:
-            with closing(db()) as conn:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM orders
-                    WHERE type = 'reservation'
-                      AND status = 'new'
-                      AND expires_at <> ''
-                      AND reminder_sent = 0
-                    """
-                ).fetchall()
-            for row in rows:
-                try:
-                    expires = datetime.strptime(row['expires_at'], "%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    continue
-                diff = (expires - now_dt()).total_seconds()
-                if 3600 <= diff <= 7200:
-                    await safe_send_user_message(bot, int(row['user_id']), f"⏰ Напоминание: бронь #{int(row['id'])} истекает в ближайшие 1–2 часа.")
-                    with closing(db()) as conn:
-                        conn.execute(
-                            "UPDATE orders SET reminder_sent = 1, updated_at = ? WHERE id = ?",
-                            (now_str(), int(row['id'])),
-                        )
-                        conn.commit()
-        except Exception as exc:
-            logging.exception("Reservation reminder job failed: %s", exc)
-        await asyncio.sleep(600)
-
-
-async def abandoned_cart_job(bot: Bot) -> None:
-    while True:
-        try:
-            threshold = now_dt() - timedelta(hours=2)
-            with closing(db()) as conn:
-                rows = conn.execute("SELECT * FROM cart_meta WHERE reminded = 0").fetchall()
-            for row in rows:
-                try:
-                    updated = datetime.strptime(row['updated_at'], "%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    continue
-                if updated <= threshold and cart_count(int(row['user_id'])) > 0:
-                    await safe_send_user_message(bot, int(row['user_id']), "🛒 Вы добавили товары в корзину, но не оформили заказ. Корзина всё ещё ждёт вас.")
-                    with closing(db()) as conn:
-                        conn.execute("UPDATE cart_meta SET reminded = 1 WHERE user_id = ?", (int(row['user_id']),))
-                        conn.commit()
-        except Exception as exc:
-            logging.exception("Abandoned cart job failed: %s", exc)
-        await asyncio.sleep(900)
-
-
-async def daily_report_job(bot: Bot) -> None:
-    last_day = ""
-    while True:
-        try:
-            current_day = now_dt().strftime("%Y-%m-%d")
-            current_hour = now_dt().hour
-            if current_hour == 21 and current_day != last_day:
-                report = daily_report_text(current_day)
-                for admin_id in ADMIN_IDS:
-                    await safe_send_user_message(bot, admin_id, report)
-                last_day = current_day
-        except Exception as exc:
-            logging.exception("Daily report job failed: %s", exc)
-        await asyncio.sleep(300)
-
-
-async def hide_old_out_of_stock_job() -> None:
-    while True:
-        try:
-            days = max(1, get_setting_int('hide_out_of_stock_after_days', 30))
-            border = (now_dt() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-            with closing(db()) as conn:
-                conn.execute("UPDATE products SET active = 0 WHERE stock <= 0 AND updated_at <> '' AND updated_at <= ?", (border,))
-                conn.commit()
-        except Exception as exc:
-            logging.exception("Hide old out-of-stock job failed: %s", exc)
-        await asyncio.sleep(3600)
-
-# =========================
-# USER HANDLERS
+# COMMAND HANDLERS
 # =========================
 async def start_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
-    upsert_customer(
-        message.from_user.id,
-        message.from_user.full_name,
-        message.from_user.username or "",
+    await message.answer(
+        f"""👋 Добро пожаловать в <b>{SHOP_NAME}</b>
+
+{SHOP_TAGLINE}""",
+        reply_markup=main_menu(),
     )
-    banner = get_setting("banner_text", SHOP_TAGLINE).strip()
-    portfolio = get_setting("portfolio_description", "").strip()
-    text = f"👋 Добро пожаловать в <b>{SHOP_NAME}</b>\n\n{escape_text(banner)}"
-    if portfolio:
-        text += f"\n\n🧩 <b>О проекте</b>\n{escape_text(portfolio)}"
-    await message.answer(text, reply_markup=main_menu(message.from_user.id))
 
 
 async def menu_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Главное меню", reply_markup=main_menu(message.from_user.id))
+    await message.answer("Главное меню", reply_markup=main_menu())
 
 
 async def help_handler(message: Message) -> None:
-    text = (
-        "/start — открыть магазин\n"
-        "/menu — главное меню\n"
-        "/help — помощь\n"
-        "/promo КОД — применить промокод\n"
-        "/settings — посмотреть настройки магазина"
-    )
-    if is_admin(message.from_user.id):
-        text += (
-            "\n/addadmin ID — добавить админа"
-            "\n/addmanager ID — добавить менеджера"
-            "\n/delrole ID — удалить роль"
-            "\n/roles — список ролей"
-            "\n/setsetting ключ значение — изменить настройку"
-        )
-    await message.answer(text, reply_markup=main_menu(message.from_user.id))
-
-
-async def settings_command(message: Message) -> None:
     await message.answer(
-        "⚙️ <b>Настройки магазина</b>\n\n"
-        f"Минимальный заказ: <b>{money(get_setting_int('min_order_amount', 0))}</b>\n"
-        f"Бесплатная доставка от: <b>{money(get_setting_int('free_delivery_from', 50000))}</b>\n"
-        f"Лимит в одни руки: <b>{get_setting_int('per_user_limit', 5)} шт.</b>\n"
-        f"Скрытие пустых товаров через: <b>{get_setting_int('hide_out_of_stock_after_days', 30)} дн.</b>\n"
-        f"Стоимость доставки: <b>{money(get_setting_int('delivery_fee', 0))}</b>",
-        reply_markup=main_menu(message.from_user.id),
+        """/start — открыть магазин
+/menu — главное меню
+/help — помощь""",
+        reply_markup=main_menu(),
     )
-
-
-async def add_admin_command(message: Message) -> None:
-    if not is_admin(message.from_user.id):
-        await message.answer("Нет доступа.")
-        return
-    parts = (message.text or '').split(maxsplit=1)
-    if len(parts) != 2 or not parts[1].strip().isdigit():
-        await message.answer("Использование: /addadmin ID")
-        return
-    uid = int(parts[1].strip())
-    assign_role(uid, 'admin')
-    await message.answer(f"Готово. Пользователь <code>{uid}</code> теперь admin.", reply_markup=main_menu(message.from_user.id))
-
-
-async def add_manager_command(message: Message) -> None:
-    if not is_admin(message.from_user.id):
-        await message.answer("Нет доступа.")
-        return
-    parts = (message.text or '').split(maxsplit=1)
-    if len(parts) != 2 or not parts[1].strip().isdigit():
-        await message.answer("Использование: /addmanager ID")
-        return
-    uid = int(parts[1].strip())
-    assign_role(uid, 'manager')
-    await message.answer(f"Готово. Пользователь <code>{uid}</code> теперь manager.", reply_markup=main_menu(message.from_user.id))
-
-
-async def del_role_command(message: Message) -> None:
-    if not is_admin(message.from_user.id):
-        await message.answer("Нет доступа.")
-        return
-    parts = (message.text or '').split(maxsplit=1)
-    if len(parts) != 2 or not parts[1].strip().isdigit():
-        await message.answer("Использование: /delrole ID")
-        return
-    uid = int(parts[1].strip())
-    if uid == MAIN_ADMIN_ID:
-        await message.answer("Главного админа удалить нельзя.")
-        return
-    remove_role(uid)
-    await message.answer(f"Роль пользователя <code>{uid}</code> удалена.", reply_markup=main_menu(message.from_user.id))
-
-
-async def roles_command(message: Message) -> None:
-    if not is_admin(message.from_user.id):
-        await message.answer("Нет доступа.")
-        return
-    await message.answer(roles_text(), reply_markup=main_menu(message.from_user.id))
-
-
-async def set_setting_command(message: Message) -> None:
-    if not is_admin(message.from_user.id):
-        await message.answer("Нет доступа.")
-        return
-    parts = (message.text or '').split(maxsplit=2)
-    if len(parts) != 3:
-        await message.answer("Использование: /setsetting ключ значение")
-        return
-    key = parts[1].strip()
-    value = parts[2].strip()
-    allowed = {"min_order_amount", "free_delivery_from", "per_user_limit", "hide_out_of_stock_after_days", "delivery_fee", "banner_text", "portfolio_description"}
-    if key not in allowed:
-        await message.answer("Недоступный ключ настройки.")
-        return
-    set_setting(key, value)
-    await message.answer(f"Настройка <b>{escape_text(key)}</b> обновлена.", reply_markup=main_menu(message.from_user.id))
-
-
-async def promo_command(message: Message, state: FSMContext) -> None:
-    parts = (message.text or '').split(maxsplit=1)
-    if len(parts) == 2:
-        ok, text = set_user_promo(message.from_user.id, parts[1])
-        await message.answer(text, reply_markup=main_menu(message.from_user.id))
-        return
-    await state.set_state(PromoState.waiting_code)
-    await message.answer("Введите промокод.", reply_markup=cancel_menu())
-
-
-async def promo_input(message: Message, state: FSMContext) -> None:
-    ok, text = set_user_promo(message.from_user.id, (message.text or '').strip())
-    await state.clear()
-    await message.answer(text, reply_markup=main_menu(message.from_user.id))
 
 
 async def cancel_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Действие отменено.", reply_markup=main_menu(message.from_user.id))
+    await message.answer("Действие отменено.", reply_markup=main_menu())
 
 
+# =========================
+# SEARCH FLOW
+# =========================
 async def search_start(message: Message, state: FSMContext) -> None:
     await state.set_state(SearchState.waiting_query)
     await message.answer(
-        "🔎 Напишите название товара, категорию или ключевое слово.",
+        "🔎 Напишите название товара или ключевое слово для поиска.",
         reply_markup=cancel_menu(),
     )
 
@@ -2004,50 +726,29 @@ async def search_input(message: Message, state: FSMContext) -> None:
     await state.clear()
 
     if not items:
-        await message.answer("Ничего не найдено. Попробуйте другой запрос.", reply_markup=main_menu(message.from_user.id))
+        await message.answer("Ничего не найдено. Попробуйте другой запрос.", reply_markup=main_menu())
         return
 
-    await message.answer(products_text("🔎 Результаты поиска", items), reply_markup=main_menu(message.from_user.id))
+    await message.answer(
+        products_text("🔎 Результаты поиска", items),
+        reply_markup=main_menu(),
+    )
     await message.answer("Открыть товары:", reply_markup=products_kb(items))
 
 
-async def favorites_open(message: Message) -> None:
-    items = favorite_items(message.from_user.id)
-    if not items:
-        await message.answer("❤️ Избранное пока пусто.", reply_markup=main_menu(message.from_user.id))
-        return
-    await message.answer(products_text("❤️ Избранное", items), reply_markup=main_menu(message.from_user.id))
-    await message.answer("Открыть товары:", reply_markup=products_kb(items))
-
-
-async def history_open(message: Message) -> None:
-    items = get_user_orders(message.from_user.id)
-    if not items:
-        await message.answer("У вас пока нет заказов и броней.", reply_markup=main_menu(message.from_user.id))
+# =========================
+# CHECKOUT FLOW
+# =========================
+async def checkout_start_from_message(message: Message, state: FSMContext) -> None:
+    if not cart_items(message.from_user.id):
+        await message.answer("Сначала добавьте товары в корзину.", reply_markup=main_menu())
         return
 
-    lines = ["📦 <b>Мои заказы и брони</b>", ""]
-    for item in items:
-        line = f"{order_type_label(item['type'])} #{int(item['id'])} • {status_label(item['status'])} • {money(int(item['total']))}"
-        if item["type"] == "reservation" and item["expires_at"] and item["status"] == "new":
-            line += f" • до {human_dt(item['expires_at'])}"
-        lines.append(line)
-
-    await message.answer("\n".join(lines), reply_markup=main_menu(message.from_user.id))
-    await message.answer("Открыть карточку:", reply_markup=history_kb(items))
-
-
-async def checkout_start(message: Message, state: FSMContext, sale_type: str, user_id: int) -> None:
-    ok, error = validate_cart_stock(user_id)
-    if not ok:
-        await message.answer(error, reply_markup=main_menu(user_id))
-        return
-
-    await state.clear()
-    await state.update_data(sale_type=sale_type)
     await state.set_state(CheckoutState.waiting_name)
     await message.answer(
-        f"✅ <b>{'Оформление заказа' if sale_type == 'order' else 'Оформление брони'}</b>\n\nВведите ваше имя:",
+        """✅ <b>Оформление заявки</b>
+
+Введите ваше имя:""",
         reply_markup=cancel_menu(),
     )
 
@@ -2060,105 +761,44 @@ async def checkout_name(message: Message, state: FSMContext) -> None:
 
     await state.update_data(customer_name=name)
     await state.set_state(CheckoutState.waiting_phone)
+    await message.answer(
+        "Введите номер телефона или нажмите кнопку ниже.",
+        reply_markup=phone_menu(),
+    )
 
-    saved_phone = get_customer_phone(message.from_user.id)
-    text = "Введите номер телефона или нажмите кнопку ниже."
-    if saved_phone:
-        text += f"\n\nСохранённый номер: <code>{escape_text(saved_phone)}</code>"
 
-    await message.answer(text, reply_markup=phone_menu())
+async def checkout_phone_text(message: Message, state: FSMContext) -> None:
+    phone = (message.text or "").strip()
+    if len(phone) < 6:
+        await message.answer("Введите корректный номер телефона.")
+        return
+
+    await state.update_data(customer_phone=phone)
+    await state.set_state(CheckoutState.waiting_address)
+    await message.answer("Введите город и адрес доставки:", reply_markup=cancel_menu())
 
 
 async def checkout_phone_contact(message: Message, state: FSMContext) -> None:
     if not message.contact:
         return
-    phone = normalize_phone(message.contact.phone_number)
-    if not validate_phone(phone):
-        await message.answer("Введите корректный номер телефона.")
-        return
 
-    upsert_customer(
-        message.from_user.id,
-        message.from_user.full_name,
-        message.from_user.username or "",
-        phone,
-    )
-    await state.update_data(customer_phone=phone)
-    data = await state.get_data()
-    if data.get("sale_type") == "reservation":
-        await state.update_data(delivery_method="pickup", payment_method="pay_later", customer_address="Самовывоз")
-        await state.set_state(CheckoutState.waiting_comment)
-        await message.answer(
-            "Напишите комментарий к брони или отправьте <b>нет</b>.",
-            reply_markup=cancel_menu(),
-        )
-        return
-
-    await state.set_state(CheckoutState.waiting_delivery)
-    await message.answer("Выберите способ доставки:", reply_markup=checkout_delivery_kb())
-
-
-async def checkout_phone_text(message: Message, state: FSMContext) -> None:
-    phone = normalize_phone((message.text or "").strip())
-    if not validate_phone(phone):
-        await message.answer("Введите корректный номер телефона.")
-        return
-
-    upsert_customer(
-        message.from_user.id,
-        message.from_user.full_name,
-        message.from_user.username or "",
-        phone,
-    )
-    await state.update_data(customer_phone=phone)
-    data = await state.get_data()
-    if data.get("sale_type") == "reservation":
-        await state.update_data(delivery_method="pickup", payment_method="pay_later", customer_address="Самовывоз")
-        await state.set_state(CheckoutState.waiting_comment)
-        await message.answer(
-            "Напишите комментарий к брони или отправьте <b>нет</b>.",
-            reply_markup=cancel_menu(),
-        )
-        return
-
-    await state.set_state(CheckoutState.waiting_delivery)
-    await message.answer("Выберите способ доставки:", reply_markup=checkout_delivery_kb())
-
-
-async def checkout_delivery_callback(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    method = callback.data.split(":", 1)[1]
-    if method not in DELIVERY_METHODS:
-        return
-    await state.update_data(delivery_method=method)
-    await state.set_state(CheckoutState.waiting_payment)
-    if callback.message:
-        await callback.message.answer("Выберите способ оплаты:", reply_markup=checkout_payment_kb())
-
-
-async def checkout_payment_callback(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    method = callback.data.split(":", 1)[1]
-    if method not in PAYMENT_METHODS:
-        return
-    await state.update_data(payment_method=method)
+    await state.update_data(customer_phone=message.contact.phone_number)
     await state.set_state(CheckoutState.waiting_address)
-    if callback.message:
-        await callback.message.answer(
-            "Введите город и адрес доставки.\nДля самовывоза можно написать: <b>Самовывоз</b>.",
-            reply_markup=cancel_menu(),
-        )
+    await message.answer("Введите город и адрес доставки:", reply_markup=cancel_menu())
 
 
 async def checkout_address(message: Message, state: FSMContext) -> None:
     address = (message.text or "").strip()
-    if len(address) < 4:
+    if len(address) < 5:
         await message.answer("Введите более полный адрес.")
         return
 
     await state.update_data(customer_address=address)
     await state.set_state(CheckoutState.waiting_comment)
-    await message.answer("Напишите комментарий к заказу или отправьте <b>нет</b>.", reply_markup=cancel_menu())
+    await message.answer(
+        "Напишите комментарий к заказу или отправьте <b>нет</b>.",
+        reply_markup=cancel_menu(),
+    )
 
 
 async def checkout_comment(message: Message, state: FSMContext, bot: Bot) -> None:
@@ -2167,59 +807,53 @@ async def checkout_comment(message: Message, state: FSMContext, bot: Bot) -> Non
         comment = "Без комментария"
 
     data = await state.get_data()
-    sale_type = str(data.get("sale_type", "order"))
-
-    try:
-        sale = create_sale(
-            sale_type=sale_type,
-            user_id=message.from_user.id,
-            customer_name=str(data.get("customer_name", "-")),
-            phone=str(data.get("customer_phone", "-")),
-            delivery_method=str(data.get("delivery_method", "pickup")),
-            payment_method=str(data.get("payment_method", "pay_later")),
-            address=str(data.get("customer_address", "Самовывоз")),
-            comment=comment,
-        )
-    except ValueError as exc:
-        await state.clear()
-        await message.answer(str(exc), reply_markup=main_menu(message.from_user.id))
-        return
-
+    order = create_order(
+        user_id=message.from_user.id,
+        name=str(data.get("customer_name", "-")),
+        phone=str(data.get("customer_phone", "-")),
+        address=str(data.get("customer_address", "-")),
+        comment=comment,
+    )
     await state.clear()
 
-    order_label = order_type_label(sale_type)
-    expires = ""
-    if sale_type == "reservation" and sale["expires_at"]:
-        expires = f"\n⏳ Действует до: <b>{human_dt(str(sale['expires_at']))}</b>"
+    admin_text = f"""🛍 <b>Новая заявка</b>
 
-    user_text = (
-        f"🎉 <b>{order_label} #{sale['id']}</b> создана.\n"
-        f"Статус: <b>{status_label(sale['status'])}</b>{expires}\n"
-        f"Сумма: <b>{money(int(sale['total']))}</b>\n\n"
-        f"Менеджер свяжется с вами после проверки."
+🧾 Заказ: <b>#{order['order_id']}</b>
+⏰ Время: {escape_text(order['created_at'])}
+👤 Клиент: {user_tag(message.from_user)}
+Имя: {escape_text(data.get('customer_name', '-'))}
+Телефон: {escape_text(data.get('customer_phone', '-'))}
+Адрес: {escape_text(data.get('customer_address', '-'))}
+Комментарий: {escape_text(comment)}
+
+<b>Товары:</b>
+{order_items_text(order['items'])}
+
+💰 Итого: <b>{money(int(order['total']))}</b>"""
+
+    try:
+        await bot.send_message(ADMIN_ID, admin_text)
+    except Exception as exc:
+        logging.exception("Cannot send order to admin: %s", exc)
+        await message.answer(
+            "Заявка сохранена, но не отправилась админу. Пусть админ сначала напишет боту /start.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    await message.answer(
+        f"🎉 Заявка <b>#{order['order_id']}</b> отправлена.",
+        reply_markup=main_menu(),
     )
-    await message.answer(user_text, reply_markup=main_menu(message.from_user.id))
-
-    admin_text = (
-        f"🆕 <b>Новая {ENTITY_LABEL[sale_type]}</b>\n\n"
-        f"{order_text(sqlite3.Row(dict, sale) if False else get_order(int(sale['id'])))}\n\n"
-        f"Клиент TG ID: <code>{message.from_user.id}</code>\n"
-        f"Username: @{escape_text(message.from_user.username or '-')}"
-    )
-
-    order_id = int(sale["id"])
-    admin_markup = admin_sale_actions_kb(order_id, "new")
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, admin_text, reply_markup=admin_markup)
-        except Exception as exc:
-            logging.warning("Cannot notify admin %s: %s", admin_id, exc)
 
 
+# =========================
+# TEXT MENU HANDLER
+# =========================
 async def text_menu(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
 
-    if text == "🛍 Каталог":
+    if text == "🛍 Коллекция":
         await state.clear()
         await message.answer("Категории каталога:", reply_markup=categories_kb())
         return
@@ -2227,14 +861,14 @@ async def text_menu(message: Message, state: FSMContext) -> None:
     if text == "🔥 Хиты":
         await state.clear()
         items = get_products(section="hits")
-        await message.answer(products_text("🔥 Хиты", items), reply_markup=main_menu(message.from_user.id))
+        await message.answer(products_text("🔥 Хиты бутика", items), reply_markup=main_menu())
         await message.answer("Открыть товары:", reply_markup=products_kb(items))
         return
 
     if text == "🆕 Новинки":
         await state.clear()
         items = get_products(section="new")
-        await message.answer(products_text("🆕 Новинки", items), reply_markup=main_menu(message.from_user.id))
+        await message.answer(products_text("🆕 Новинки", items), reply_markup=main_menu())
         await message.answer("Открыть товары:", reply_markup=products_kb(items))
         return
 
@@ -2242,94 +876,87 @@ async def text_menu(message: Message, state: FSMContext) -> None:
         await search_start(message, state)
         return
 
-    if text == "❤️ Избранное":
-        await state.clear()
-        await favorites_open(message)
-        return
-
     if text == "🧺 Корзина":
         await state.clear()
         items = cart_items(message.from_user.id)
-        await message.answer(cart_text(message.from_user.id), reply_markup=main_menu(message.from_user.id))
+        await message.answer(cart_text(message.from_user.id), reply_markup=main_menu())
         if items:
             await message.answer("Управление корзиной:", reply_markup=cart_kb(items))
         return
 
-    if text == "📦 Мои заказы и брони":
-        await state.clear()
-        await history_open(message)
+    if text == "✅ Оформить заявку":
+        await checkout_start_from_message(message, state)
         return
 
-    if text == "💬 Менеджер":
+    if text in {"🛟 Техподдержка", "💬 Менеджер"}:
         await state.clear()
-        await message.answer(
-            f"💬 <b>Менеджер</b>\n\n"
-            f"Имя: {escape_text(MANAGER_NAME)}\n"
-            f"Контакт: {escape_text(manager_contact_label())}\n"
-            f"Телефон: {escape_text(SHOP_PHONE)}",
-            reply_markup=main_menu(message.from_user.id),
-        )
-        await message.answer(
-            "Быстрая связь:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Написать менеджеру", url=manager_url())]]),
-        )
+        await message.answer(SUPPORT_TEXT, reply_markup=main_menu())
+        await message.answer("Выберите способ связи:", reply_markup=support_kb())
         return
 
     if text == "🚚 Доставка":
         await state.clear()
-        await message.answer(DELIVERY_TEXT, reply_markup=main_menu(message.from_user.id))
+        await message.answer(DELIVERY_TEXT, reply_markup=main_menu())
         return
 
-    if text == "🎟 Промокод":
-        await promo_command(message, state)
-        return
-
-    if text == "🎉 Акции":
+    if text == "⭐ Отзывы":
         await state.clear()
-        await message.answer(
-            "🎉 <b>Акции магазина</b>\n\n• Промокод <b>WELCOME10</b> — скидка 10%\n• Бесплатная доставка от суммы, указанной в настройках\n• Постоянным клиентам начисляется персональная скидка",
-            reply_markup=main_menu(message.from_user.id),
-        )
+        await message.answer(REVIEWS_TEXT, reply_markup=main_menu())
         return
 
-    if text == "ℹ️ О магазине":
+    if text == "ℹ️ О бутике":
         await state.clear()
-        await message.answer(about_text(), reply_markup=main_menu(message.from_user.id))
+        await message.answer(ABOUT_TEXT, reply_markup=main_menu())
         return
 
-    if text == "⚙️ Админ-панель":
+    if text == "⚙️ Управление":
         await state.clear()
-        if not is_admin(message.from_user.id):
-            await message.answer("⛔ Этот раздел доступен только админу.", reply_markup=main_menu(message.from_user.id))
+        if message.from_user.id != ADMIN_ID:
+            await message.answer("⛔ Этот раздел доступен только админу.", reply_markup=main_menu())
             return
+
         stats = get_stats()
         await message.answer(
-            "⚙️ <b>Админ-панель</b>\n\n"
-            f"Товаров: <b>{stats['products']}</b>\n"
-            f"Заказов: <b>{stats['orders']}</b>\n"
-            f"Броней: <b>{stats['reservations']}</b>\n"
-            f"Остаток на складе: <b>{stats['stock']} шт.</b>\n"
-            f"Оборот: <b>{money(stats['revenue'])}</b>\n"
-            f"Админ ID: <code>{MAIN_ADMIN_ID}</code>",
-            reply_markup=main_menu(message.from_user.id),
+            f"""⚙️ <b>Панель управления</b>
+
+Товаров: <b>{stats['products']}</b>
+Заказов: <b>{stats['orders']}</b>
+Выручка: <b>{money(stats['revenue'])}</b>""",
+            reply_markup=main_menu(),
         )
-        await message.answer("Инструменты:", reply_markup=admin_kb())
+        await message.answer("Админ-инструменты:", reply_markup=admin_kb())
         return
 
     if text.isdigit():
         product = get_product(int(text))
         if product:
             await state.clear()
-            await send_product_message(message, product, message.from_user.id)
+            await send_product_message(message, product)
             return
 
     await state.clear()
-    await message.answer("Выберите нужный раздел через меню.", reply_markup=main_menu(message.from_user.id))
+    await message.answer("Выберите нужный раздел через меню.", reply_markup=main_menu())
 
 
 # =========================
-# CALLBACKS: CATALOG AND CART
+# CALLBACK HANDLERS
 # =========================
+async def callback_support_open(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(SUPPORT_TEXT, reply_markup=support_kb())
+
+
+async def callback_support_email(callback: CallbackQuery) -> None:
+    await callback.answer("Email показан ниже")
+    if callback.message:
+        await callback.message.answer(
+            f"""📧 <b>Email техподдержки</b>
+
+<code>{escape_text(SUPPORT_EMAIL)}</code>"""
+        )
+
+
 async def callback_catalog(callback: CallbackQuery) -> None:
     await callback.answer()
     if callback.message:
@@ -2339,47 +966,10 @@ async def callback_catalog(callback: CallbackQuery) -> None:
 async def callback_section(callback: CallbackQuery) -> None:
     await callback.answer()
     section = callback.data.split(":", 1)[1]
-    if section == "week_hits":
-        title = "🔥 Хиты недели"
-        items = get_week_hit_products(20)
-    elif section == "week_new":
-        title = "🆕 Новинки за 7 дней"
-        items = get_week_new_products(20)
-    else:
-        title = "🔥 Хиты" if section == "hits" else "🆕 Новинки"
-        items = get_products(section=section)
+    title = "🔥 Хиты бутика" if section == "hits" else "🆕 Новинки"
+    items = get_products(section=section)
     if callback.message:
         await callback.message.answer(products_text(title, items))
-        await callback.message.answer("Открыть товары:", reply_markup=products_kb(items))
-
-
-async def callback_price_filter(callback: CallbackQuery) -> None:
-    await callback.answer()
-    _, min_price, max_price = callback.data.split(":")
-    price_min = int(min_price)
-    price_max = int(max_price)
-    title = f"💸 Цена от {money(price_min)} до {money(price_max)}" if price_min > 0 else f"💸 До {money(price_max)}"
-    items = get_products(price_min=price_min if price_min > 0 else None, price_max=price_max, only_available=True, sort_by='cheap')
-    if callback.message:
-        await callback.message.answer(products_text(title, items))
-        await callback.message.answer("Открыть товары:", reply_markup=products_kb(items))
-
-
-async def callback_sort(callback: CallbackQuery) -> None:
-    await callback.answer()
-    sort_by = callback.data.split(":", 1)[1]
-    title = "↕️ Сортировка: дешевле" if sort_by == 'cheap' else "↕️ Сортировка: дороже"
-    items = get_products(sort_by=sort_by, only_available=True, limit=30)
-    if callback.message:
-        await callback.message.answer(products_text(title, items))
-        await callback.message.answer("Открыть товары:", reply_markup=products_kb(items))
-
-
-async def callback_filter_available(callback: CallbackQuery) -> None:
-    await callback.answer()
-    items = get_products(only_available=True, limit=30)
-    if callback.message:
-        await callback.message.answer(products_text("📦 Только в наличии", items))
         await callback.message.answer("Открыть товары:", reply_markup=products_kb(items))
 
 
@@ -2400,82 +990,56 @@ async def callback_product(callback: CallbackQuery) -> None:
         if callback.message:
             await callback.message.answer("Товар не найден.")
         return
+
     if callback.message:
-        await send_product_message(callback.message, product, callback.from_user.id)
-        similar = [x for x in get_products(category=str(product['category'])) if int(x['id']) != int(product['id'])][:3]
-        cross = [x for x in get_cross_sell_products(product_id, 3) if int(x['id']) != int(product['id'])]
-        if similar:
-            await callback.message.answer("Похожие товары:", reply_markup=products_kb(similar))
-        if cross:
-            await callback.message.answer("🛍 С этим товаром часто берут:", reply_markup=products_kb(cross))
+        await send_product_message(callback.message, product)
 
 
 async def callback_add(callback: CallbackQuery) -> None:
-    if not throttle_ok(callback.from_user.id, "cart_add"):
-        await callback.answer("Слишком быстро", show_alert=False)
+    await callback.answer("Товар добавлен в корзину")
+    product_id = int(callback.data.split(":", 1)[1])
+    product = get_product(product_id)
+    if not product:
         return
 
-    product_id = int(callback.data.split(":", 1)[1])
-    ok, text = cart_add(callback.from_user.id, product_id, 1)
-    await callback.answer("Добавлено" if ok else "Ошибка", show_alert=not ok)
+    cart_add(callback.from_user.id, product_id, 1)
     if callback.message:
-        if ok:
-            items = cart_items(callback.from_user.id)
-            await callback.message.answer(
-                f"✅ {escape_text(text)}\nСейчас в корзине: <b>{cart_count(callback.from_user.id)}</b> шт."
-            )
-            await callback.message.answer(cart_text(callback.from_user.id), reply_markup=cart_kb(items))
-        else:
-            await callback.message.answer(f"⚠️ {escape_text(text)}")
-
-
-async def callback_favorite(callback: CallbackQuery) -> None:
-    await callback.answer()
-    product_id = int(callback.data.split(":", 1)[1])
-    added = toggle_favorite(callback.from_user.id, product_id)
-    if callback.message:
-        product = get_product(product_id)
-        if product:
-            await callback.message.answer(
-                f"{'❤️ Добавлено в избранное.' if added else '💔 Удалено из избранного.'}",
-                reply_markup=product_kb(product_id, callback.from_user.id),
-            )
+        await callback.message.answer(
+            f"✅ <b>{escape_text(product['title'])}</b> добавлен в корзину.\nСейчас в корзине: <b>{cart_count(callback.from_user.id)}</b> шт."
+        )
 
 
 async def callback_cart_open(callback: CallbackQuery) -> None:
     await callback.answer()
     items = cart_items(callback.from_user.id)
     if callback.message:
-        await callback.message.answer(cart_text(callback.from_user.id))
-        if items:
-            await callback.message.answer("Управление корзиной:", reply_markup=cart_kb(items))
+        if not items:
+            await callback.message.answer(cart_text(callback.from_user.id))
+        else:
+            await callback.message.answer(cart_text(callback.from_user.id), reply_markup=cart_kb(items))
 
 
 async def callback_cart_edit(callback: CallbackQuery) -> None:
-    if not throttle_ok(callback.from_user.id, "cart_edit"):
-        await callback.answer("Слишком быстро", show_alert=False)
-        return
-
     await callback.answer()
     _, action, product_id_str = callback.data.split(":")
     product_id = int(product_id_str)
 
     if action == "plus":
-        ok, text = cart_change(callback.from_user.id, product_id, 1)
+        cart_change(callback.from_user.id, product_id, 1)
     elif action == "minus":
-        ok, text = cart_change(callback.from_user.id, product_id, -1)
-    else:
+        cart_change(callback.from_user.id, product_id, -1)
+    elif action == "del":
         cart_remove(callback.from_user.id, product_id)
-        ok, text = True, "Удалено."
 
     items = cart_items(callback.from_user.id)
     if callback.message:
         if not items:
             await callback.message.edit_text(cart_text(callback.from_user.id))
         else:
-            await callback.message.edit_text(cart_text(callback.from_user.id), reply_markup=cart_kb(items))
-        if text and action != "del":
-            await callback.message.answer(text)
+            await callback.message.edit_text(
+                cart_text(callback.from_user.id),
+                reply_markup=cart_kb(items),
+            )
 
 
 async def callback_cart_clear(callback: CallbackQuery) -> None:
@@ -2487,64 +1051,61 @@ async def callback_cart_clear(callback: CallbackQuery) -> None:
 
 async def callback_checkout_start(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    sale_type = callback.data.split(":", 1)[1]
-    if sale_type not in {"order", "reservation"}:
-        return
-    if callback.message:
-        await checkout_start(callback.message, state, sale_type, callback.from_user.id)
-
-
-async def callback_sale_view(callback: CallbackQuery) -> None:
-    await callback.answer()
-    order_id = int(callback.data.split(":")[2])
-    order = get_order(order_id)
-    if not order or int(order["user_id"]) != callback.from_user.id:
+    if not cart_items(callback.from_user.id):
         if callback.message:
-            await callback.message.answer("Запись не найдена.")
+            await callback.message.answer("Корзина пуста.")
         return
+
+    await state.set_state(CheckoutState.waiting_name)
     if callback.message:
-        await callback.message.answer(order_text(order))
+        await callback.message.answer(
+            """✅ <b>Оформление заявки</b>
+
+Введите ваше имя:""",
+            reply_markup=cancel_menu(),
+        )
 
 
-
-
-async def callback_sale_repeat(callback: CallbackQuery) -> None:
-    await callback.answer()
-    order_id = int(callback.data.split(":")[2])
-    order = get_order(order_id)
-    if not order or int(order["user_id"]) != callback.from_user.id:
-        if callback.message:
-            await callback.message.answer("Запись не найдена.")
+async def callback_admin_stats(callback: CallbackQuery) -> None:
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
         return
-    cart_clear(callback.from_user.id)
-    items = get_order_items(order_id)
-    added = 0
-    for item in items:
-        ok, _ = cart_add(callback.from_user.id, int(item['product_id']), int(item['quantity']))
-        if ok:
-            added += int(item['quantity'])
-    if callback.message:
-        await callback.message.answer(f"Повтор заказа добавлен в корзину: {added} шт.")
-        current = cart_items(callback.from_user.id)
-        await callback.message.answer(cart_text(callback.from_user.id), reply_markup=cart_kb(current))
 
-
-async def callback_sale_extend(callback: CallbackQuery, bot: Bot) -> None:
     await callback.answer()
-    order_id = int(callback.data.split(":")[2])
-    with closing(db()) as conn:
-        row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
-        if not row or int(row['user_id']) != callback.from_user.id or row['type'] != 'reservation' or row['status'] != 'new':
-            if callback.message:
-                await callback.message.answer("Бронь нельзя продлить.")
-            return
-        new_exp = (datetime.strptime(row['expires_at'], "%Y-%m-%d %H:%M:%S") + timedelta(hours=RESERVATION_HOURS)).strftime("%Y-%m-%d %H:%M:%S") if row['expires_at'] else (now_dt() + timedelta(hours=RESERVATION_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
-        conn.execute("UPDATE orders SET expires_at = ?, updated_at = ? WHERE id = ?", (new_exp, now_str(), order_id))
-        conn.commit()
+    stats = get_stats()
     if callback.message:
-        await callback.message.answer(f"Бронь #{order_id} продлена до {human_dt(new_exp)}")
-    for admin_id in ADMIN_IDS:
-        await safe_send_user_message(bot, admin_id, f"⏳ Клиент продлил бронь #{order_id} до {human_dt(new_exp)}")
+        await callback.message.answer(
+            f"""📊 <b>Статистика магазина</b>
+
+Товаров: <b>{stats['products']}</b>
+Заказов: <b>{stats['orders']}</b>
+Выручка: <b>{money(stats['revenue'])}</b>"""
+        )
+
+
+async def callback_admin_orders(callback: CallbackQuery) -> None:
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+    orders = get_recent_orders()
+    if not callback.message:
+        return
+
+    if not orders:
+        await callback.message.answer("Заказов пока нет.")
+        return
+
+    lines = ["🧾 <b>Последние заказы</b>", ""]
+    for order in orders:
+        lines.append(
+            f"#{order['id']} • {escape_text(order['created_at'])}\n"
+            f"{escape_text(order['customer_name'])} • {money(int(order['total']))}"
+        )
+        lines.append("")
+
+    await callback.message.answer("\n".join(lines))
 
 
 async def noop_handler(callback: CallbackQuery) -> None:
@@ -2552,585 +1113,14 @@ async def noop_handler(callback: CallbackQuery) -> None:
 
 
 # =========================
-# ADMIN HANDLERS
-# =========================
-async def admin_guard(callback: CallbackQuery) -> bool:
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return False
-    return True
-
-
-async def callback_admin_back(callback: CallbackQuery) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    if callback.message:
-        stats = get_stats()
-        await callback.message.answer(
-            "⚙️ <b>Админ-панель</b>\n\n"
-            f"Товаров: <b>{stats['products']}</b>\n"
-            f"Заказов: <b>{stats['orders']}</b>\n"
-            f"Броней: <b>{stats['reservations']}</b>\n"
-            f"Оборот: <b>{money(stats['revenue'])}</b>\n"
-            f"Админ ID: <code>{MAIN_ADMIN_ID}</code>"
-        )
-        await callback.message.answer("Инструменты:", reply_markup=admin_kb())
-
-
-async def callback_admin_stats(callback: CallbackQuery) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    stats = get_stats()
-    if callback.message:
-        await callback.message.answer(
-            "📊 <b>Статистика магазина</b>\n\n"
-            f"Товаров: <b>{stats['products']}</b>\n"
-            f"Заказов: <b>{stats['orders']}</b>\n"
-            f"Броней: <b>{stats['reservations']}</b>\n"
-            f"Остаток на складе: <b>{stats['stock']} шт.</b>\n"
-            f"Оборот: <b>{money(stats['revenue'])}</b>\n"
-            f"Главный админ: <code>{MAIN_ADMIN_ID}</code>"
-        )
-
-
-async def callback_admin_list_sales(callback: CallbackQuery) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    sale_type = callback.data.split(":")[2]
-    rows = get_recent_sales(20, sale_type)
-    if not callback.message:
-        return
-    if not rows:
-        await callback.message.answer("Пока записей нет.")
-        return
-
-    lines = [f"📋 <b>{'Заказы' if sale_type == 'order' else 'Брони'}</b>", ""]
-    for row in rows:
-        line = (
-            f"{order_type_label(row['type'])} #{int(row['id'])} • "
-            f"{escape_text(row['customer_name'])} • "
-            f"{status_label(row['status'])} • "
-            f"{money(int(row['total']))}"
-        )
-        if row["type"] == "reservation" and row["expires_at"] and row["status"] == "new":
-            line += f" • до {human_dt(row['expires_at'])}"
-        lines.append(line)
-
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=f"Открыть #{int(row['id'])}", callback_data=f"admin:sale:{int(row['id'])}")]
-            for row in rows[:10]
-        ] + [[InlineKeyboardButton(text="⬅️ Админ-панель", callback_data="admin:back")]]
-    )
-    await callback.message.answer("\n".join(lines), reply_markup=kb)
-
-
-async def callback_admin_sale_view(callback: CallbackQuery) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    order_id = int(callback.data.split(":")[2])
-    order = get_order(order_id)
-    if not order:
-        if callback.message:
-            await callback.message.answer("Запись не найдена.")
-        return
-    if callback.message:
-        await callback.message.answer(order_text(order), reply_markup=admin_sale_actions_kb(order_id, str(order["status"])))
-
-
-async def callback_admin_status(callback: CallbackQuery, bot: Bot) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    _, _, order_id_str, status = callback.data.split(":")
-    order_id = int(order_id_str)
-
-    ok, text = update_sale_status(order_id, status)
-    order = get_order(order_id)
-    if callback.message:
-        if not ok:
-            await callback.message.answer(text)
-            return
-        await callback.message.answer(f"✅ {text}")
-        if order:
-            await callback.message.answer(
-                order_text(order),
-                reply_markup=admin_sale_actions_kb(order_id, str(order["status"])),
-            )
-
-    if order:
-        entity = "Заказ" if order["type"] == "order" else "Бронь"
-        user_text = f"ℹ️ <b>{entity} #{order_id}</b>: статус изменён на <b>{status_label(status)}</b>."
-        await safe_send_user_message(bot, int(order["user_id"]), user_text)
-
-
-async def callback_admin_products(callback: CallbackQuery) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    items = get_products()
-    if callback.message:
-        await callback.message.answer(
-            products_text("🛠 Товары", items),
-            reply_markup=admin_products_kb(items[:25]),
-        )
-
-
-async def callback_admin_product_view(callback: CallbackQuery) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    product_id = int(callback.data.split(":")[2])
-    product = admin_get_product(product_id)
-    if not product:
-        if callback.message:
-            await callback.message.answer("Товар не найден.")
-        return
-    if callback.message:
-        await callback.message.answer(product_admin_text(product), reply_markup=admin_product_actions_kb(product_id))
-
-
-async def callback_admin_toggle_product(callback: CallbackQuery) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    _, _, product_id_str, field = callback.data.split(":")
-    product_id = int(product_id_str)
-    product = admin_get_product(product_id)
-    if not product:
-        return
-    new_value = 0 if int(product[field]) else 1
-    update_product_field(product_id, field, new_value)
-    product = admin_get_product(product_id)
-    if callback.message and product:
-        await callback.message.answer(product_admin_text(product), reply_markup=admin_product_actions_kb(product_id))
-
-
-async def callback_admin_edit_product(callback: CallbackQuery, state: FSMContext) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    _, _, product_id_str, field = callback.data.split(":")
-    product_id = int(product_id_str)
-    product = admin_get_product(product_id)
-    if not product:
-        if callback.message:
-            await callback.message.answer("Товар не найден.")
-        return
-
-    hints = {
-        "title": "Введите новое название.",
-        "price": "Введите новую цену числом.",
-        "category": "Введите новую категорию.",
-        "description": "Введите новое описание.",
-        "photo": "Отправьте URL фото, file_id или саму фотографию.",
-        "stock": "Введите новый остаток числом.",
-    }
-    await state.clear()
-    await state.set_state(AdminProductEditState.waiting_value)
-    await state.update_data(product_id=product_id, edit_field=field)
-    if callback.message:
-        await callback.message.answer(hints[field], reply_markup=cancel_menu())
-
-
-async def admin_edit_product_value(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    product_id = int(data["product_id"])
-    field = str(data["edit_field"])
-    value_text = (message.text or "").strip()
-
-    try:
-        if field == "price":
-            value: object = int(value_text)
-            if int(value) < 0:
-                raise ValueError
-        elif field == "stock":
-            value = int(value_text)
-            if int(value) < 0:
-                raise ValueError
-        else:
-            value = value_text
-            if not str(value).strip():
-                raise ValueError
-    except Exception:
-        await message.answer("Некорректное значение. Попробуйте ещё раз.")
-        return
-
-    update_product_field(product_id, field, value)
-    await state.clear()
-    product = admin_get_product(product_id)
-    if product:
-        await message.answer("✅ Товар обновлён.", reply_markup=main_menu(message.from_user.id))
-        await message.answer(product_admin_text(product), reply_markup=admin_product_actions_kb(product_id))
-
-
-async def admin_edit_product_photo(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    product_id = int(data["product_id"])
-    field = str(data["edit_field"])
-    if field != "photo" or not message.photo:
-        return
-    file_id = message.photo[-1].file_id
-    update_product_field(product_id, "photo", file_id)
-    await state.clear()
-    product = admin_get_product(product_id)
-    if product:
-        await message.answer("✅ Фото обновлено.", reply_markup=main_menu(message.from_user.id))
-        await message.answer(product_admin_text(product), reply_markup=admin_product_actions_kb(product_id))
-
-
-async def callback_admin_add_product(callback: CallbackQuery, state: FSMContext) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    await state.clear()
-    await state.set_state(AdminProductAddState.waiting_title)
-    if callback.message:
-        await callback.message.answer("Введите название нового товара.", reply_markup=cancel_menu())
-
-
-async def admin_add_product_title(message: Message, state: FSMContext) -> None:
-    title = (message.text or "").strip()
-    if len(title) < 2:
-        await message.answer("Название слишком короткое.")
-        return
-    await state.update_data(title=title)
-    await state.set_state(AdminProductAddState.waiting_price)
-    await message.answer("Введите цену числом.")
-
-
-async def admin_add_product_price(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-    if not text.isdigit():
-        await message.answer("Цена должна быть числом.")
-        return
-    await state.update_data(price=int(text))
-    await state.set_state(AdminProductAddState.waiting_category)
-    await message.answer("Введите категорию товара.")
-
-
-async def admin_add_product_category(message: Message, state: FSMContext) -> None:
-    category = (message.text or "").strip()
-    if len(category) < 2:
-        await message.answer("Категория слишком короткая.")
-        return
-    await state.update_data(category=category)
-    await state.set_state(AdminProductAddState.waiting_description)
-    await message.answer("Введите описание товара.")
-
-
-async def admin_add_product_description(message: Message, state: FSMContext) -> None:
-    description = (message.text or "").strip()
-    if len(description) < 5:
-        await message.answer("Описание слишком короткое.")
-        return
-    await state.update_data(description=description)
-    await state.set_state(AdminProductAddState.waiting_photo)
-    await message.answer("Отправьте URL фото, file_id, саму фотографию или напишите <b>нет</b>.")
-
-
-async def admin_add_product_photo_text(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-    await state.update_data(photo="" if text.lower() == "нет" else text)
-    await state.set_state(AdminProductAddState.waiting_stock)
-    await message.answer("Введите остаток числом.")
-
-
-async def admin_add_product_photo_upload(message: Message, state: FSMContext) -> None:
-    if not message.photo:
-        return
-    await state.update_data(photo=message.photo[-1].file_id)
-    await state.set_state(AdminProductAddState.waiting_stock)
-    await message.answer("Фото сохранено. Теперь введите остаток числом.")
-
-
-async def admin_add_product_stock(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-    if not text.isdigit():
-        await message.answer("Остаток должен быть числом.")
-        return
-    await state.update_data(stock=int(text))
-    await state.set_state(AdminProductAddState.waiting_flags)
-    await message.answer("Товар хит и/или новинка? Напишите в формате: <b>хит,новинка</b> или <b>нет</b>.")
-
-
-async def admin_add_product_flags(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip().lower()
-    is_hit = 1 if "хит" in text else 0
-    is_new = 1 if "нов" in text else 0
-
-    data = await state.get_data()
-    product_id = add_product(
-        {
-            "title": data["title"],
-            "price": data["price"],
-            "category": data["category"],
-            "description": data["description"],
-            "photo": data.get("photo", ""),
-            "stock": data["stock"],
-            "is_hit": is_hit,
-            "is_new": is_new,
-        }
-    )
-    await state.clear()
-
-    product = admin_get_product(product_id)
-    await message.answer(f"✅ Товар #{product_id} добавлен.", reply_markup=main_menu(message.from_user.id))
-    if product:
-        await message.answer(product_admin_text(product), reply_markup=admin_product_actions_kb(product_id))
-
-
-async def callback_admin_search_start(callback: CallbackQuery, state: FSMContext) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    await state.clear()
-    await state.set_state(AdminOrderSearchState.waiting_query)
-    if callback.message:
-        await callback.message.answer(
-            "Введите номер заказа, имя клиента или телефон.",
-            reply_markup=cancel_menu(),
-        )
-
-
-async def admin_search_input(message: Message, state: FSMContext) -> None:
-    query = (message.text or "").strip()
-    rows = admin_search_sales(query)
-    await state.clear()
-    if not rows:
-        await message.answer("Ничего не найдено.", reply_markup=main_menu(message.from_user.id))
-        return
-
-    lines = ["🔎 <b>Результаты поиска</b>", ""]
-    buttons = []
-    for row in rows:
-        lines.append(
-            f"{order_type_label(row['type'])} #{int(row['id'])} • {escape_text(row['customer_name'])} • {escape_text(row['phone'])} • {status_label(row['status'])}"
-        )
-        buttons.append([InlineKeyboardButton(text=f"Открыть #{int(row['id'])}", callback_data=f"admin:sale:{int(row['id'])}")])
-
-    await message.answer("\n".join(lines), reply_markup=main_menu(message.from_user.id))
-    await message.answer("Открыть запись:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons[:15]))
-
-
-async def callback_admin_export(callback: CallbackQuery) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer("Готовлю CSV…")
-    sales = get_recent_sales(5000)
-    with closing(db()) as conn:
-        products = conn.execute("SELECT * FROM products ORDER BY id DESC").fetchall()
-        customers = conn.execute("SELECT * FROM customers ORDER BY updated_at DESC").fetchall()
-
-    if callback.message:
-        if sales:
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8-sig", newline="", delete=False, suffix=".csv") as tmp:
-                writer = csv.writer(tmp, delimiter=";")
-                writer.writerow(["id","user_id","type","status","customer_name","phone","delivery_method","payment_method","address","comment","total","created_at","updated_at","expires_at"])
-                for row in sales:
-                    writer.writerow([int(row["id"]), int(row["user_id"]), row["type"], row["status"], row["customer_name"], row["phone"], row["delivery_method"], row["payment_method"], row["address"], row["comment"], int(row["total"]), row["created_at"], row["updated_at"], row["expires_at"]])
-                sales_path = tmp.name
-            await callback.message.answer_document(FSInputFile(sales_path, filename=f"sales_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"))
-
-        if products:
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8-sig", newline="", delete=False, suffix=".csv") as tmp:
-                writer = csv.writer(tmp, delimiter=";")
-                writer.writerow(["id","title","price","category","description","photo","is_hit","is_new","stock","active","created_at","updated_at"])
-                for row in products:
-                    writer.writerow([int(row["id"]), row["title"], int(row["price"]), row["category"], row["description"], row["photo"], int(row["is_hit"]), int(row["is_new"]), int(row["stock"]), int(row["active"]), row["created_at"], row["updated_at"]])
-                products_path = tmp.name
-            await callback.message.answer_document(FSInputFile(products_path, filename=f"products_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"))
-
-        if customers:
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8-sig", newline="", delete=False, suffix=".csv") as tmp:
-                writer = csv.writer(tmp, delimiter=";")
-                writer.writerow(["user_id","full_name","username","phone","updated_at"])
-                for row in customers:
-                    writer.writerow([int(row["user_id"]), row["full_name"], row["username"], row["phone"], row["updated_at"]])
-                customers_path = tmp.name
-            await callback.message.answer_document(FSInputFile(customers_path, filename=f"customers_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"))
-
-
-async def callback_admin_import_start(callback: CallbackQuery, state: FSMContext) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    await state.set_state(AdminImportCsvState.waiting_file)
-    if callback.message:
-        await callback.message.answer(
-            "Отправьте CSV-файл с колонками: title, price, category, description, photo, stock, is_hit, is_new",
-            reply_markup=cancel_menu(),
-        )
-
-
-async def callback_admin_report(callback: CallbackQuery) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    if callback.message:
-        await callback.message.answer(daily_report_text())
-
-
-async def admin_import_csv_file(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id):
-        await state.clear()
-        await message.answer("Нет доступа.")
-        return
-    if not message.document:
-        await message.answer("Пришлите именно CSV-файл.")
-        return
-
-    tmp_path = Path(tempfile.gettempdir()) / f"import_{message.from_user.id}_{int(time.time())}.csv"
-    await message.bot.download(message.document, destination=tmp_path)
-
-    added = 0
-    updated = 0
-    failed = 0
-    note = ""
-    try:
-        sample = tmp_path.read_text(encoding='utf-8-sig', errors='ignore')
-        dialect = csv.Sniffer().sniff(sample[:1024], delimiters=';,') if sample.strip() else csv.excel
-        with tmp_path.open('r', encoding='utf-8-sig', newline='') as fh:
-            reader = csv.DictReader(fh, dialect=dialect)
-            required = {'title', 'price', 'category', 'description', 'photo', 'stock', 'is_hit', 'is_new'}
-            if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
-                raise ValueError('Неверные колонки CSV.')
-            with closing(db()) as conn:
-                for row in reader:
-                    try:
-                        title = (row.get('title') or '').strip()
-                        category = (row.get('category') or '').strip()
-                        description = (row.get('description') or '').strip()
-                        photo = (row.get('photo') or '').strip()
-                        price = int((row.get('price') or '0').strip())
-                        stock = int((row.get('stock') or '0').strip())
-                        is_hit = 1 if str(row.get('is_hit', '0')).strip().lower() in {'1','true','yes','да'} else 0
-                        is_new = 1 if str(row.get('is_new', '0')).strip().lower() in {'1','true','yes','да'} else 0
-                        if not title or not category or not description or price <= 0:
-                            failed += 1
-                            continue
-                        existing = conn.execute('SELECT id FROM products WHERE LOWER(title)=LOWER(?)', (title,)).fetchone()
-                        if existing:
-                            conn.execute(
-                                "UPDATE products SET price=?, category=?, description=?, photo=?, stock=?, is_hit=?, is_new=?, active=1, updated_at=? WHERE id=?",
-                                (price, category, description, photo, stock, is_hit, is_new, now_str(), int(existing['id'])),
-                            )
-                            updated += 1
-                        else:
-                            conn.execute(
-                                "INSERT INTO products(title, price, category, description, photo, is_hit, is_new, stock, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
-                                (title, price, category, description, photo, is_hit, is_new, stock, now_str(), now_str()),
-                            )
-                            added += 1
-                    except Exception:
-                        failed += 1
-                conn.execute("INSERT INTO import_logs(imported_by, imported_at, rows_count, note) VALUES (?, ?, ?, ?)", (message.from_user.id, now_str(), added + updated, f'failed={failed}'))
-                conn.commit()
-        note = f"Добавлено: {added}, обновлено: {updated}, пропущено: {failed}."
-    except Exception as exc:
-        note = f"Ошибка импорта: {escape_text(exc)}"
-    finally:
-        await state.clear()
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
-
-    await message.answer(f"📥 Импорт CSV завершён.\n{note}", reply_markup=main_menu(message.from_user.id))
-
-
-async def callback_admin_backup(callback: CallbackQuery) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer("Отправляю бэкап…")
-    if callback.message:
-        await callback.message.answer_document(FSInputFile(DB_PATH, filename=Path(DB_PATH).name))
-        if Path(LOG_PATH).exists():
-            await callback.message.answer_document(FSInputFile(LOG_PATH, filename=Path(LOG_PATH).name))
-
-
-
-
-async def callback_admin_expiring(callback: CallbackQuery) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    today = now_dt().strftime("%Y-%m-%d")
-    with closing(db()) as conn:
-        rows = conn.execute(
-            "SELECT * FROM orders WHERE type = 'reservation' AND status = 'new' AND expires_at LIKE ? ORDER BY expires_at ASC",
-            (f"{today}%",),
-        ).fetchall()
-    if callback.message:
-        if not rows:
-            await callback.message.answer("Сегодня истекающих броней нет.")
-            return
-        for row in rows[:20]:
-            await callback.message.answer(order_text(row), reply_markup=admin_sale_actions_kb(int(row['id']), row['status']))
-
-
-async def callback_admin_mass_price_start(callback: CallbackQuery, state: FSMContext) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    await state.set_state(AdminMassPriceState.waiting_percent)
-    if callback.message:
-        await callback.message.answer("Введите процент изменения цены. Примеры: <b>10</b> или <b>-15</b>", reply_markup=cancel_menu())
-
-
-async def admin_mass_price_input(message: Message, state: FSMContext) -> None:
-    try:
-        percent = int((message.text or '').strip())
-    except Exception:
-        await message.answer("Введите целое число, например 10 или -5.")
-        return
-    with closing(db()) as conn:
-        rows = conn.execute("SELECT id, price FROM products WHERE active = 1").fetchall()
-        for row in rows:
-            new_price = max(1, int(int(row['price']) * (100 + percent) / 100))
-            conn.execute("UPDATE products SET price = ?, updated_at = ? WHERE id = ?", (new_price, now_str(), int(row['id'])))
-        conn.commit()
-    await state.clear()
-    await message.answer(f"Готово. Цены изменены на {percent}%.", reply_markup=main_menu(message.from_user.id))
-
-
-async def callback_admin_broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
-    if not await admin_guard(callback):
-        return
-    await callback.answer()
-    await state.set_state(AdminBroadcastState.waiting_text)
-    if callback.message:
-        await callback.message.answer("Отправьте текст рассылки для клиентов.", reply_markup=cancel_menu())
-
-
-async def admin_broadcast_input(message: Message, state: FSMContext, bot: Bot) -> None:
-    text = (message.text or '').strip()
-    if len(text) < 3:
-        await message.answer("Текст слишком короткий.")
-        return
-    await state.clear()
-    with closing(db()) as conn:
-        users = conn.execute("SELECT user_id FROM customers ORDER BY updated_at DESC").fetchall()
-    sent = 0
-    for row in users:
-        try:
-            await bot.send_message(int(row['user_id']), f"📣 <b>Новость от {SHOP_NAME}</b>\n\n{escape_text(text)}")
-            sent += 1
-        except Exception:
-            pass
-    await message.answer(f"Рассылка завершена. Отправлено: {sent}", reply_markup=main_menu(message.from_user.id))
-
-# =========================
 # MAIN
 # =========================
 async def main() -> None:
-    configure_logging()
+    logging.basicConfig(level=logging.INFO)
     init_db()
 
-    if not BOT_TOKEN:
-        raise ValueError("Укажите BOT_TOKEN в переменных окружения.")
+    if BOT_TOKEN == "PASTE_BOT_TOKEN_HERE":
+        raise ValueError("Укажите BOT_TOKEN в переменных окружения или прямо в коде.")
 
     bot = Bot(
         token=BOT_TOKEN,
@@ -3141,88 +1131,36 @@ async def main() -> None:
     dp.message.register(start_handler, CommandStart())
     dp.message.register(menu_handler, Command("menu"))
     dp.message.register(help_handler, Command("help"))
-    dp.message.register(settings_command, Command("settings"))
-    dp.message.register(add_admin_command, Command("addadmin"))
-    dp.message.register(add_manager_command, Command("addmanager"))
-    dp.message.register(del_role_command, Command("delrole"))
-    dp.message.register(roles_command, Command("roles"))
-    dp.message.register(set_setting_command, Command("setsetting"))
-    dp.message.register(promo_command, Command("promo"))
+
     dp.message.register(cancel_handler, F.text == "❌ Отмена")
 
     dp.message.register(search_input, SearchState.waiting_query)
-    dp.message.register(promo_input, PromoState.waiting_code)
 
     dp.message.register(checkout_name, CheckoutState.waiting_name)
     dp.message.register(checkout_phone_contact, CheckoutState.waiting_phone, F.contact)
     dp.message.register(checkout_phone_text, CheckoutState.waiting_phone, F.text)
-    dp.callback_query.register(checkout_delivery_callback, F.data.startswith("delivery:"))
-    dp.callback_query.register(checkout_payment_callback, F.data.startswith("payment:"))
     dp.message.register(checkout_address, CheckoutState.waiting_address)
     dp.message.register(checkout_comment, CheckoutState.waiting_comment)
 
     dp.callback_query.register(noop_handler, F.data == "noop")
+    dp.callback_query.register(callback_support_open, F.data == "support:open")
+    dp.callback_query.register(callback_support_email, F.data == "support:email")
     dp.callback_query.register(callback_catalog, F.data == "catalog:open")
     dp.callback_query.register(callback_section, F.data.startswith("section:"))
-    dp.callback_query.register(callback_price_filter, F.data.startswith("price:"))
-    dp.callback_query.register(callback_sort, F.data.startswith("sort:"))
-    dp.callback_query.register(callback_filter_available, F.data == "filter:available")
     dp.callback_query.register(callback_category, F.data.startswith("cat:"))
     dp.callback_query.register(callback_product, F.data.startswith("product:"))
     dp.callback_query.register(callback_add, F.data.startswith("add:"))
-    dp.callback_query.register(callback_favorite, F.data.startswith("fav:"))
     dp.callback_query.register(callback_cart_open, F.data == "cart:open")
     dp.callback_query.register(callback_cart_edit, F.data.startswith("cart:plus:"))
     dp.callback_query.register(callback_cart_edit, F.data.startswith("cart:minus:"))
     dp.callback_query.register(callback_cart_edit, F.data.startswith("cart:del:"))
     dp.callback_query.register(callback_cart_clear, F.data == "cart:clear")
-    dp.callback_query.register(callback_checkout_start, F.data.startswith("checkout:"))
-    dp.callback_query.register(callback_sale_view, F.data.startswith("sale:view:"))
-    dp.callback_query.register(callback_sale_repeat, F.data.startswith("sale:repeat:"))
-    dp.callback_query.register(callback_sale_extend, F.data.startswith("sale:extend:"))
-
-    dp.callback_query.register(callback_admin_back, F.data == "admin:back")
+    dp.callback_query.register(callback_checkout_start, F.data == "checkout:start")
     dp.callback_query.register(callback_admin_stats, F.data == "admin:stats")
-    dp.callback_query.register(callback_admin_list_sales, F.data.startswith("admin:list:"))
-    dp.callback_query.register(callback_admin_sale_view, F.data.startswith("admin:sale:"))
-    dp.callback_query.register(callback_admin_status, F.data.startswith("admin:status:"))
-    dp.callback_query.register(callback_admin_products, F.data == "admin:products")
-    dp.callback_query.register(callback_admin_product_view, F.data.startswith("admin:product:"))
-    dp.callback_query.register(callback_admin_toggle_product, F.data.startswith("admin:toggle:"))
-    dp.callback_query.register(callback_admin_edit_product, F.data.startswith("admin:edit:"))
-    dp.callback_query.register(callback_admin_add_product, F.data == "admin:add_product")
-    dp.callback_query.register(callback_admin_search_start, F.data == "admin:search")
-    dp.callback_query.register(callback_admin_export, F.data == "admin:export")
-    dp.callback_query.register(callback_admin_import_start, F.data == "admin:import")
-    dp.callback_query.register(callback_admin_backup, F.data == "admin:backup")
-    dp.callback_query.register(callback_admin_report, F.data == "admin:report")
-    dp.callback_query.register(callback_admin_expiring, F.data == "admin:expiring")
-    dp.callback_query.register(callback_admin_broadcast_start, F.data == "admin:broadcast")
-    dp.callback_query.register(callback_admin_mass_price_start, F.data == "admin:mass_price")
-
-    dp.message.register(admin_add_product_title, AdminProductAddState.waiting_title)
-    dp.message.register(admin_add_product_price, AdminProductAddState.waiting_price)
-    dp.message.register(admin_add_product_category, AdminProductAddState.waiting_category)
-    dp.message.register(admin_add_product_description, AdminProductAddState.waiting_description)
-    dp.message.register(admin_add_product_photo_upload, AdminProductAddState.waiting_photo, F.photo)
-    dp.message.register(admin_add_product_photo_text, AdminProductAddState.waiting_photo, F.text)
-    dp.message.register(admin_add_product_stock, AdminProductAddState.waiting_stock)
-    dp.message.register(admin_add_product_flags, AdminProductAddState.waiting_flags)
-
-    dp.message.register(admin_edit_product_photo, AdminProductEditState.waiting_value, F.photo)
-    dp.message.register(admin_edit_product_value, AdminProductEditState.waiting_value, F.text)
-    dp.message.register(admin_search_input, AdminOrderSearchState.waiting_query)
-    dp.message.register(admin_mass_price_input, AdminMassPriceState.waiting_percent)
-    dp.message.register(admin_broadcast_input, AdminBroadcastState.waiting_text)
-    dp.message.register(admin_import_csv_file, AdminImportCsvState.waiting_file, F.document)
+    dp.callback_query.register(callback_admin_orders, F.data == "admin:orders")
 
     dp.message.register(text_menu, F.text)
 
-    asyncio.create_task(expire_reservations_job(bot))
-    asyncio.create_task(reservation_reminders_job(bot))
-    asyncio.create_task(abandoned_cart_job(bot))
-    asyncio.create_task(daily_report_job(bot))
-    asyncio.create_task(hide_old_out_of_stock_job())
     await dp.start_polling(bot)
 
 
